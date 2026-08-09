@@ -483,6 +483,9 @@ async function main() {
       `live translate ON (${reason}; window: "${appName}"; → ${opts.to}). Session: ${sessionDir}`
     );
     notify(`debug log: ${log.sessionPath || log.latestPath}`);
+    if (opts.mic) {
+      notify('mic STT paused while live (Meet keeps the GPU) — type "stop" to ask questions by voice.');
+    }
   }
 
   async function handleCommand(cmd) {
@@ -508,7 +511,7 @@ async function main() {
       status.set('pause', 'ask a question anytime');
       notify(
         opts.mic
-          ? 'translate paused — ask typed/spoken questions about the transcript, or "start" again.'
+          ? 'translate paused — mic back on for spoken questions; type or speak, or "start" again.'
           : 'translate paused — type questions, or "start" / "save".'
       );
     } else if (cmd === 'save') {
@@ -1025,6 +1028,9 @@ async function main() {
       (samples) => {
         if (isAudioMuted(source)) return;
         if (!recording && source === 'meeting') return;
+        // While live-translating, keep the only Whisper worker on Meet audio.
+        // Mic STT resumes automatically on "stop" for spoken Q&A.
+        if (recording && source === 'you') return;
         try {
           sttStream.feed(samples);
         } catch (err) {
