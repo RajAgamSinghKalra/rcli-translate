@@ -31,8 +31,8 @@ function banner({ to = 'en', other = 'other', tts = true } = {}) {
   const lines = [
     '',
     `  ${title}  ${tag}`,
-    paint(c.dim, '  hear them → fix ASR → translate → captions' + (tts ? ' + voice' : '')),
-    paint(c.dim, `  target ${to}  ·  other [${other}]  ·  headphones on`),
+    paint(c.dim, '  auto-detect them → translate → captions' + (tts ? ' + voice' : '')),
+    paint(c.dim, `  into ${to}  ·  other [${other}]  ·  headphones on`),
     '',
   ];
   return lines.join('\n');

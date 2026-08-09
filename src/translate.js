@@ -36,24 +36,25 @@ function buildTranslatePrompt({
   disableThinking = false,
 }) {
   const hint = srcLangHint
-    ? `Whisper guessed the source language code as "${srcLangHint}" (may be wrong).`
+    ? `Whisper guessed the source language code as "${srcLangHint}" (may be wrong — trust the text).`
     : 'Source language is unknown — detect it from the text.';
   const ctx = recentContext
     ? `\nRecent meeting context (for disambiguation only):\n${recentContext}\n`
     : '';
 
-  return `You repair live meeting speech-to-text and translate it.
+  return `You repair live meeting speech-to-text and translate it into the user's language.
 
 ${TRANSCRIPTION_CAVEAT}
 
 ${hint}
+The speaker may switch languages between utterances — always detect THIS utterance's language, then translate into "${to}".
 Target language code: ${to}
 ${ctx}
 Raw ASR utterance:
 """${text}"""
 
 Return ONLY a single JSON object (no markdown fences, no commentary) with keys:
-  "lang"         — ISO 639-1 source language code you believe was spoken (e.g. "hi", "en", "es")
+  "lang"         — ISO 639-1 source language code for THIS utterance (e.g. "hi", "en", "es")
   "repaired"     — cleaned version in the SOURCE language (fix ASR errors; keep meaning; do not translate here)
   "translation"  — natural ${to} translation of the repaired meaning
 

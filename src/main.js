@@ -74,9 +74,10 @@ const USAGE = `rcli-translate -- live translate the other person in a meeting, t
 Usage: node src/main.js [options]
 
 Options:
-  --to <lang>          Target language code for translations (default: en)
-                       Common: en, hi, es, fr, de, pt, ja, ko, zh, ar, ta, te
-  --from <lang>        Language THEY speak (default: en; use auto to detect)
+  --to <lang>          YOUR language — translations are spoken/shown in this
+                       (default: en). Common: en hi es fr de pt ja ko zh ar ta te
+  --from <lang>        Their spoken language (default: auto = detect per utterance,
+                       including mid-call switches). Override with en/hi/… if needed.
   --pick-to            Interactive menu to choose --to at startup
   --minutes <n>        Recency window for Q&A (default: 20)
   --llm <id|path>      RunAnywhere LLM catalog id or local GGUF path
@@ -123,7 +124,8 @@ function parseArgs(argv) {
     micGain: Number(env('MIC_GAIN', '1')) || 1,
     other: env('OTHER', 'transcribing'),
     to: (env('TO', 'en') || 'en').toLowerCase(),
-    from: (env('FROM', 'en') || 'en').toLowerCase(), // meeting STT language; "auto" allowed
+    // auto = Whisper detects their language per utterance (handles mid-call switches)
+    from: (env('FROM', 'auto') || 'auto').toLowerCase(),
     autostart: true,
     muteOriginal: /^(1|on|true|yes)$/i.test(env('MUTE_ORIGINAL', '')),
     loopbackDevice: env('LOOPBACK', ''),
@@ -362,7 +364,7 @@ async function main() {
     );
   }
   console.log(
-    `[rcli-translate] translating meeting → ${opts.to}; other labeled [${opts.sourceLabels.meeting}].`
+    `[rcli-translate] translating meeting (auto-detect their language) → ${opts.to}; other labeled [${opts.sourceLabels.meeting}].`
   );
 
   const rl = readline.createInterface({
@@ -864,11 +866,11 @@ async function main() {
     const streamOpts =
       source === 'meeting'
         ? {
-            language: opts.from || 'en',
+            language: opts.from || 'auto',
             prompt:
               opts.from && opts.from !== 'auto'
                 ? `Meeting speech in ${opts.from}. Transcribe accurately.`
-                : 'Live multilingual meeting speech. Transcribe in the spoken language.',
+                : 'Live multilingual meeting speech. Detect the spoken language and transcribe accurately in that language. Language may change mid-conversation.',
           }
         : { language: 'en', prompt: MIC_PROMPT };
     const sttStream = stt.createStream(streamOpts);

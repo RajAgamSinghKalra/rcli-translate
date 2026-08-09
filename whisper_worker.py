@@ -257,16 +257,28 @@ def _transcribe(lib, ctx, samples, n_samples, lang_bytes, prompt_bytes, mode, n_
                 parts.append(t.decode("utf-8", errors="replace"))
         return detected or "und", "".join(parts).strip()
 
-    lang_str = (lang_bytes or b"en").decode("utf-8", errors="replace").strip().lower() or "en"
-    detected, text = run_once(lang_str, use_prompt=True)
+    lang_str = (lang_bytes or b"auto").decode("utf-8", errors="replace").strip().lower() or "auto"
+    # Auto mode: skip initial_prompt on the first pass — English prompts can
+    # bias multilingual decode toward empty / wrong language.
+    use_prompt_first = lang_str not in ("auto", "detect", "")
+    detected, text = run_once(lang_str, use_prompt=use_prompt_first)
 
-    # Retry once if auto/fixed decode returned nothing — common with bad auto
-    # settings or an English prompt biasing an empty decode.
+    # Retry if empty — auto can miss once; fixed lang can miss when they switched.
     if not text and n_samples >= SAMPLE_RATE:
-        for fallback in ("en", "auto"):
-            if fallback == lang_str:
+        retries = []
+        if lang_str in ("auto", "detect", ""):
+            retries = [("auto", False), ("en", False)]
+        else:
+            retries = [("auto", False), ("en", False)]
+            if lang_str not in ("en", "auto"):
+                retries.insert(0, (lang_str, False))
+        seen = {(lang_str, use_prompt_first)}
+        for fb_lang, fb_prompt in retries:
+            key = (fb_lang, fb_prompt)
+            if key in seen:
                 continue
-            detected2, text2 = run_once(fallback, use_prompt=False)
+            seen.add(key)
+            detected2, text2 = run_once(fb_lang, use_prompt=fb_prompt)
             if text2:
                 return {"lang": detected2 or detected, "text": text2}
 

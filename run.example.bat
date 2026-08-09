@@ -12,8 +12,8 @@ set "RCLI_XL8_LLM_PATH=D:/the_code/gpu-bench-qwen3/Qwen3-4B-Q4_K_M.gguf"
 :: Optional: real python.exe if `python` is the Windows Store stub.
 set "RCLI_XL8_PYTHON=C:/Users/rajag/AppData/Local/Programs/Python/Python314/python.exe"
 
-:: Target language for live translations (default en).
-set "RCLI_XL8_TO=en"
+:: Your language — live translations go into this (Whisper auto-detects theirs).
+set "RCLI_XL8_TO=hi"
 
 :: Label for the other person in captions.
 set "RCLI_XL8_OTHER=other"
