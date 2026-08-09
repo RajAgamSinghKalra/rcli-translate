@@ -7,3 +7,5 @@ logs/
 *.tar.bz2
 *.bin
 run.bat
+__pycache__/
+*.pyc
