@@ -7,7 +7,10 @@ const ELECTRON_SDK_DIST =
 
 // Any RunAnywhere LLM catalog id (e.g. "qwen2.5-3b", auto-downloaded) or a
 // local GGUF path works here; override with RCLI_XL8_LLM_PATH / RCLI_MEET_LLM_PATH.
-const DEFAULT_LLM_PATH = process.env.RCLI_XL8_LLM_PATH || process.env.RCLI_MEET_LLM_PATH || 'qwen2.5-3b';
+const DEFAULT_LLM_PATH =
+  process.env.RCLI_XL8_LLM_PATH ||
+  process.env.RCLI_MEET_LLM_PATH ||
+  'D:/the_code/gpu-bench-qwen3/Qwen3-4B-Q4_K_M.gguf';
 const DEFAULT_EMBEDDER_ID = process.env.RCLI_XL8_EMBEDDER_ID || process.env.RCLI_MEET_EMBEDDER_ID || 'minilm';
 
 // Reasoning models (Qwen3 et al.) spend tokens inside <think>...</think>
@@ -102,7 +105,7 @@ async function loadEngine({ llmPath = DEFAULT_LLM_PATH, embedderId = DEFAULT_EMB
   } catch (err) {
     throw new Error(
       `could not load the RunAnywhere Electron SDK from:\n  ${ELECTRON_SDK_DIST}\n` +
-        `Set RCLI_MEET_SDK_DIST to your @runanywhere/electron "dist" directory.\n` +
+        `Set RCLI_XL8_SDK_DIST (or RCLI_MEET_SDK_DIST) to your @runanywhere/electron "dist" directory.\n` +
         `(underlying error: ${err.message})`
     );
   }
