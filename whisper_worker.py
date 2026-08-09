@@ -232,11 +232,18 @@ def _transcribe(lib, ctx, samples, n_samples, lang_bytes, prompt_bytes, mode, n_
         params.temperature_inc = 0.2
         params.suppress_blank = True
         params.suppress_nst = True
-        # Slightly lower so quiet / accented speech is less often dropped as "no speech".
         params.no_speech_thold = 0.55
         params.entropy_thold = 2.8
         params.logprob_thold = -1.0
         params.greedy.best_of = BEST_OF_FINAL if mode == 1 else 1
+        # Short clips: trim encoder context to audio length (+margin). Same
+        # quality for that utterance, much less GPU work than a padded 30s window.
+        sec = n_samples / float(SAMPLE_RATE)
+        if sec < 25.0:
+            # ~100 mel frames / second; +64 margin. Cap at model max (1500).
+            params.audio_ctx = min(1500, max(150, int(sec * 100) + 64))
+        else:
+            params.audio_ctx = 0
 
         rc = lib.whisper_full(ctx, params, samples, n_samples)
         lib.whisper_free_params(params_ptr)
@@ -262,11 +269,14 @@ def _transcribe(lib, ctx, samples, n_samples, lang_bytes, prompt_bytes, mode, n_
         return detected or "und", "".join(parts).strip()
 
     # RMS gate — don't burn a second GPU decode on near-silence / Discord beds.
+    step = 4 if n_samples > 1600 else 1
     energy = 0.0
-    for i in range(n_samples):
+    count = 0
+    for i in range(0, n_samples, step):
         v = samples[i]
         energy += v * v
-    rms = (energy / max(1, n_samples)) ** 0.5
+        count += 1
+    rms = (energy / max(1, count)) ** 0.5
 
     lang_str = (lang_bytes or b"auto").decode("utf-8", errors="replace").strip().lower() or "auto"
     # Auto mode: skip initial_prompt on the first pass — English prompts can
@@ -307,7 +317,7 @@ def main() -> int:
         "--prompt",
         default="Live meeting speech. Transcribe accurately in the spoken language.",
     )
-    parser.add_argument("--threads", type=int, default=max(2, (os.cpu_count() or 4) // 2))
+    parser.add_argument("--threads", type=int, default=min(4, max(2, (os.cpu_count() or 4) // 2)))
     args = parser.parse_args()
 
     lib = _load_lib(args.bin_dir)

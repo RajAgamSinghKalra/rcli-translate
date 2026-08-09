@@ -1019,3 +1019,28 @@ test('parseTranslateJson ignores legacy en key when target is Hindi', () => {
   const bad = parseTranslateJson('{"lang":"en","repaired":"x","en":"Hello"}', 'hi');
   assert.strictEqual(bad.translation, '');
 });
+
+test('jsonObjectComplete detects closed JSON early', () => {
+  const { jsonObjectComplete } = require('../src/translate');
+  assert.ok(!jsonObjectComplete('{"lang":"en"'));
+  assert.ok(jsonObjectComplete('{"lang":"en","translation":"hi"}'));
+  assert.ok(jsonObjectComplete('preamble {"a":"b}c","x":1} trailing'));
+  assert.ok(!jsonObjectComplete('{"a":"{still"'));
+});
+
+test('retrieval defer queues embeds and flush indexes them', () => {
+  let embeds = 0;
+  const r = createRetrieval({
+    embed() {
+      embeds++;
+      return Float32Array.from([1, 0]);
+    },
+  });
+  r.add({ line: 'a', text: 'a', elapsedMs: 0 }, { defer: true });
+  r.add({ line: 'b', text: 'b', elapsedMs: 1 }, { defer: true });
+  assert.strictEqual(embeds, 0);
+  assert.strictEqual(r.pendingCount, 2);
+  r.flush();
+  assert.strictEqual(embeds, 2);
+  assert.strictEqual(r.pendingCount, 0);
+});

@@ -503,6 +503,7 @@ async function main() {
         summarizer.setPaused(false);
         summarizer.maybeUpdate({ force: true });
       }
+      if (retrieval && typeof retrieval.flush === 'function') retrieval.flush();
       if (sttStreams.meeting && typeof sttStreams.meeting.reset === 'function') {
         sttStreams.meeting.reset();
       }
@@ -848,7 +849,7 @@ async function main() {
         tgtLang: result.targetOk ? opts.to : result.lang || lang || 'und',
       };
       const seg = transcript.add(display, 'meeting', startedAt, meta);
-      retrieval.add(seg);
+      retrieval.add(seg, { defer: true });
       summarizer.addSegment(seg);
       // Don't steal the LLM lock for summaries while live-translating.
       if (!recording) summarizer.maybeUpdate();
@@ -988,7 +989,7 @@ async function main() {
       if (recording && source === 'you') {
         ensureSessionState();
         const seg = transcript.add(text, source, startedAt);
-        retrieval.add(seg);
+        retrieval.add(seg, { defer: true });
         summarizer.addSegment(seg);
         // Live translate owns the LLM — don't summarize mid-call.
         if (!recording) summarizer.maybeUpdate();

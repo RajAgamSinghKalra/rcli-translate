@@ -68,13 +68,8 @@ function assertModelPresent(modelPath = MODEL_PATH) {
   );
 }
 
-function rms(samples) {
-  let sum = 0;
-  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
-  return Math.sqrt(sum / samples.length);
-}
-
 function mergeChunks(chunks) {
+  if (chunks.length === 1) return chunks[0];
   const total = chunks.reduce((n, c) => n + c.length, 0);
   const out = new Float32Array(total);
   let off = 0;
@@ -83,6 +78,21 @@ function mergeChunks(chunks) {
     off += c.length;
   }
   return out;
+}
+
+/** Fast RMS — subsample for VAD (quality of decode unchanged). */
+function rms(samples) {
+  const n = samples.length;
+  if (n === 0) return 0;
+  const step = n > 1600 ? 4 : 1;
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < n; i += step) {
+    const v = samples[i];
+    sum += v * v;
+    count++;
+  }
+  return Math.sqrt(sum / count);
 }
 
 /**
@@ -302,11 +312,20 @@ function createSTTEngine(modelPath = MODEL_PATH) {
   const pending = [];
 
   proc.stdout.on('data', (chunk) => {
-    stdoutBuf = Buffer.concat([stdoutBuf, chunk]);
+    // Avoid Buffer.concat on every tiny read when possible.
+    if (stdoutBuf.length === 0) stdoutBuf = Buffer.from(chunk);
+    else stdoutBuf = Buffer.concat([stdoutBuf, chunk]);
     while (pending.length && stdoutBuf.length >= 4) {
       const n = stdoutBuf.readUInt32LE(0);
+      if (n > 8 * 1024 * 1024) {
+        // Corrupt framing — reset rather than allocating huge.
+        stdoutBuf = Buffer.alloc(0);
+        const waiter = pending.shift();
+        if (waiter) waiter.reject(new Error('whisper_worker framing overflow'));
+        break;
+      }
       if (stdoutBuf.length < 4 + n) break;
-      const text = stdoutBuf.subarray(4, 4 + n).toString('utf8');
+      const text = stdoutBuf.toString('utf8', 4, 4 + n);
       stdoutBuf = stdoutBuf.subarray(4 + n);
       pending.shift().resolve(text.trim());
     }
@@ -346,19 +365,41 @@ function createSTTEngine(modelPath = MODEL_PATH) {
       pending.push({ resolve, reject });
       const promptBuf = Buffer.from(String(prompt || ''), 'utf8');
       const langBuf = Buffer.from(String(language || LANGUAGE || 'auto'), 'utf8');
-      const header = Buffer.alloc(4 + 1 + 4);
-      header.writeUInt32LE(samples.length, 0);
-      header.writeUInt8(mode === 'final' ? 1 : 0, 4);
-      header.writeUInt32LE(promptBuf.length, 5);
-      const langHeader = Buffer.alloc(4);
-      langHeader.writeUInt32LE(langBuf.length, 0);
-      const pcm = Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
+      // One contiguous write when small enough — fewer syscalls on the hot path.
+      const pcmBytes = samples.byteLength;
+      const total = 4 + 1 + 4 + promptBuf.length + 4 + langBuf.length + pcmBytes;
       try {
-        proc.stdin.write(header);
-        if (promptBuf.length) proc.stdin.write(promptBuf);
-        proc.stdin.write(langHeader);
-        if (langBuf.length) proc.stdin.write(langBuf);
-        proc.stdin.write(pcm);
+        if (total <= 8 * 1024 * 1024) {
+          const buf = Buffer.allocUnsafe(total);
+          let o = 0;
+          buf.writeUInt32LE(samples.length, o); o += 4;
+          buf.writeUInt8(mode === 'final' ? 1 : 0, o); o += 1;
+          buf.writeUInt32LE(promptBuf.length, o); o += 4;
+          if (promptBuf.length) {
+            promptBuf.copy(buf, o);
+            o += promptBuf.length;
+          }
+          buf.writeUInt32LE(langBuf.length, o); o += 4;
+          if (langBuf.length) {
+            langBuf.copy(buf, o);
+            o += langBuf.length;
+          }
+          Buffer.from(samples.buffer, samples.byteOffset, pcmBytes).copy(buf, o);
+          proc.stdin.write(buf);
+        } else {
+          const header = Buffer.alloc(4 + 1 + 4);
+          header.writeUInt32LE(samples.length, 0);
+          header.writeUInt8(mode === 'final' ? 1 : 0, 4);
+          header.writeUInt32LE(promptBuf.length, 5);
+          const langHeader = Buffer.alloc(4);
+          langHeader.writeUInt32LE(langBuf.length, 0);
+          const pcm = Buffer.from(samples.buffer, samples.byteOffset, pcmBytes);
+          proc.stdin.write(header);
+          if (promptBuf.length) proc.stdin.write(promptBuf);
+          proc.stdin.write(langHeader);
+          if (langBuf.length) proc.stdin.write(langBuf);
+          proc.stdin.write(pcm);
+        }
       } catch (err) {
         pending.pop();
         reject(err);
@@ -371,11 +412,13 @@ function createSTTEngine(modelPath = MODEL_PATH) {
   // Shared across meeting + mic streams so GPU isn't double-booked.
   const scheduler = createDecodeScheduler(async (samples, prompt, mode, language) => {
     await ready;
+    // Quick energy reject without full pass when clearly empty.
+    const n = samples.length;
+    if (n < SAMPLE_RATE * 0.25) return { lang: 'und', text: '' };
     let energy = 0;
-    for (let i = 0; i < samples.length; i++) energy += samples[i] * samples[i];
-    if (samples.length < SAMPLE_RATE * 0.25 || energy / samples.length < 1e-7) {
-      return { lang: 'und', text: '' };
-    }
+    const step = n > 1600 ? 4 : 1;
+    for (let i = 0; i < n; i += step) energy += samples[i] * samples[i];
+    if (energy / Math.ceil(n / step) < 1e-7) return { lang: 'und', text: '' };
     const raw = await transcribe(samples, prompt, mode, language);
     return parseWorkerPayload(raw);
   });
@@ -443,9 +486,9 @@ function createSTTEngine(modelPath = MODEL_PATH) {
       const keepSamples = Math.floor((OVERLAP_MS / 1000) * SAMPLE_RATE);
       const all = mergeChunks(chunks);
       if (all.length <= keepSamples) return;
-      const tail = all.subarray(all.length - keepSamples);
+      // subarray is a view — copy so later pushes don't clobber the tail.
       chunks.length = 0;
-      chunks.push(Float32Array.from(tail));
+      chunks.push(all.slice(all.length - keepSamples));
       bufferedMs = OVERLAP_MS;
     }
 

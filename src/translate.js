@@ -123,14 +123,43 @@ function parseTranslateJson(raw, to = 'en') {
 }
 
 async function runGenerate(llm, prompt, maxTokens) {
+  const parts = [];
   let raw = '';
   for await (const token of llm.generate(prompt, {
     maxTokens,
     temperature: TRANSLATE_TEMPERATURE,
   })) {
+    parts.push(token);
     raw += token;
+    // Same answer, fewer tokens: stop once a complete JSON object is on the wire.
+    if (raw.length >= 24 && jsonObjectComplete(raw)) break;
   }
-  return raw;
+  return parts.length === 1 ? parts[0] : parts.join('');
+}
+
+/** True when `s` contains a fully closed top-level `{...}` (string-aware). */
+function jsonObjectComplete(s) {
+  const start = s.indexOf('{');
+  if (start < 0) return false;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -230,5 +259,6 @@ module.exports = {
   isAlreadyTargetLang,
   looksLikeTargetLang,
   lightRepair,
+  jsonObjectComplete,
   TRANSLATE_MAX_TOKENS,
 };

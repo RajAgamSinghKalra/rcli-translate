@@ -69,7 +69,8 @@ function startCapture(source, onSamples, onFatal = () => {}, opts = {}) {
 
   function drainWork() {
     drainScheduled = false;
-    const batch = Math.min(workQueue.length, 8);
+    // Drain more per tick — STT feed is cheap; backlog was the risk.
+    const batch = Math.min(workQueue.length, 24);
     for (let i = 0; i < batch; i++) {
       try {
         onSamples(workQueue.shift());

@@ -14,29 +14,77 @@ function dot(a, b) {
  */
 function createRetrieval(embedder, { onError = () => {} } = {}) {
   const items = [];
+  const pending = []; // segments waiting to be embedded (deferred during live translate)
+  let flushTimer = null;
+  let flushing = false;
+
+  function embedOne(segment) {
+    try {
+      const vec = embedder.embed(segment.text);
+      items.push({ ...segment, vec });
+      return true;
+    } catch (err) {
+      onError(`could not index a transcript segment for search: ${err.message}`);
+      return false;
+    }
+  }
+
+  function scheduleFlush() {
+    if (flushTimer || flushing) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      void flushPending();
+    }, 0);
+    if (flushTimer.unref) flushTimer.unref();
+  }
+
+  async function flushPending() {
+    if (flushing) return;
+    flushing = true;
+    try {
+      // Yield between embeds so Whisper/LLM keep the event loop.
+      while (pending.length) {
+        const seg = pending.shift();
+        embedOne(seg);
+        await new Promise((r) => setImmediate(r));
+      }
+    } finally {
+      flushing = false;
+      if (pending.length) scheduleFlush();
+    }
+  }
 
   return {
     /**
      * @param segment {{line: string, text: string, elapsedMs: number}}
-     * @returns {boolean} whether the segment was indexed
+     * @param opts {{defer?: boolean}} defer=true queues embed off the live path
+     * @returns {boolean} whether the segment was accepted (indexed or queued)
      */
-    add(segment) {
-      // embed() runs native code; a failure here used to propagate out of the
-      // STT 'final' handler and kill the session. Losing one segment from the
-      // similarity index is far better -- it's still in the transcript and
-      // still reachable through the recency window.
-      try {
-        const vec = embedder.embed(segment.text);
-        items.push({ ...segment, vec });
+    add(segment, opts = {}) {
+      if (opts.defer) {
+        pending.push(segment);
+        scheduleFlush();
         return true;
-      } catch (err) {
-        onError(`could not index a transcript segment for search: ${err.message}`);
-        return false;
       }
+      return embedOne(segment);
+    },
+
+    /** Force any deferred embeds (call on stop / before Q&A). */
+    flush() {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      while (pending.length) embedOne(pending.shift());
+      return pending.length === 0;
     },
 
     get size() {
-      return items.length;
+      return items.length + pending.length;
+    },
+
+    get pendingCount() {
+      return pending.length;
     },
 
     /**
@@ -46,6 +94,8 @@ function createRetrieval(embedder, { onError = () => {} } = {}) {
      *   verbatim in the recency window) so the prompt doesn't repeat itself.
      */
     topK(query, k = 5, exclude = new Set()) {
+      // Catch up deferred embeds before searching so Q&A quality stays intact.
+      this.flush();
       if (items.length === 0) return [];
       let qvec;
       try {
