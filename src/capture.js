@@ -108,7 +108,19 @@ function startCapture(source, onSamples, onFatal = () => {}, opts = {}) {
       usableLen === pending.length ? Buffer.alloc(0) : Buffer.from(pending.subarray(usableLen));
 
     workQueue.push(floats);
-    while (workQueue.length > 40) workQueue.shift();
+    // Prefer dropping oldest idle chunks, but log so we know ASR saw holes.
+    let dropped = 0;
+    while (workQueue.length > 48) {
+      workQueue.shift();
+      dropped++;
+    }
+    if (dropped && source === 'loopback') {
+      // Rare — only when STT is badly behind.
+      if (!startCapture._dropLogAt || Date.now() - startCapture._dropLogAt > 5000) {
+        startCapture._dropLogAt = Date.now();
+        process.stdout.write(`[capture:${source}] dropped ${dropped} audio chunk(s) (STT behind)\n`);
+      }
+    }
 
     if (!drainScheduled) {
       drainScheduled = true;

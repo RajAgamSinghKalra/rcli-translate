@@ -993,3 +993,27 @@ test('filterWhisperStderr drops auto-detect spam', () => {
   assert.ok(!/auto-detected/i.test(cleaned));
   assert.match(cleaned, /ready/);
 });
+
+test('createDecodeScheduler never drops an unresolved final', async () => {
+  const { createDecodeScheduler } = require('../src/sttVulkan');
+  const order = [];
+  const scheduler = createDecodeScheduler(async (_s, _p, mode, language) => {
+    order.push(`${mode}:${language}`);
+    await new Promise((r) => setTimeout(r, 5));
+    return { lang: language || 'und', text: mode, rawText: mode };
+  });
+  const a = scheduler.final(new Float32Array(1600), '', 'en', { priority: 10 });
+  const b = scheduler.final(new Float32Array(1600), '', 'hi', { priority: 10 });
+  const results = await Promise.all([a, b]);
+  assert.strictEqual(results.length, 2);
+  assert.ok(results.every((r) => r && r.text === 'final'));
+  assert.deepStrictEqual(order, ['final:en', 'final:hi']);
+});
+
+test('parseTranslateJson ignores legacy en key when target is Hindi', () => {
+  const { parseTranslateJson } = require('../src/translate');
+  const parsed = parseTranslateJson('{"lang":"en","repaired":"hi","en":"Hello","translation":"नमस्ते"}', 'hi');
+  assert.strictEqual(parsed.translation, 'नमस्ते');
+  const bad = parseTranslateJson('{"lang":"en","repaired":"x","en":"Hello"}', 'hi');
+  assert.strictEqual(bad.translation, '');
+});

@@ -51,13 +51,23 @@ function main() {
   const child = spawn(
     process.execPath,
     [path.join(__dirname, 'main.js'), ...process.argv.slice(2)],
-    { stdio: ['inherit', 'pipe', 'ignore'] }
+    { stdio: ['inherit', 'pipe', 'pipe'] }
   );
 
   const filter = createFilter((text) => process.stdout.write(text));
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => filter.push(chunk));
   child.stdout.on('end', () => filter.flush());
+
+  // Surface real errors; still drop RAC spam if it ever lands on stderr.
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => {
+    for (const line of String(chunk).split(/\r?\n/)) {
+      if (!line) continue;
+      if (line.startsWith(LOG_PREFIX)) continue;
+      process.stderr.write(line + '\n');
+    }
+  });
 
   child.on('error', (err) => {
     console.log(`[rcli-translate] could not start: ${err.message}`);

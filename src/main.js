@@ -108,7 +108,7 @@ We hear them on the cable; you only hear the spoken translation on your headset.
 
 Use headphones so your mic does not pick up translated TTS.
 Latency after they finish speaking is typically ~1–3s (VAD + Whisper + LLM).
-Continuous speech is cut every ~6.5s so voice stays near live (stale TTS is dropped).
+Continuous speech is cut every ~5.5s with overlap so voice stays near live (stale TTS is dropped).
 
 Environment: RCLI_XL8_* (falls back to RCLI_MEET_*) — see README.md`;
 
@@ -263,6 +263,7 @@ function normalizeFinalPayload(payload) {
       lang: String(payload.lang || 'und').toLowerCase(),
       rawText: String(payload.rawText || payload.text || '').trim(),
       msAudio: payload.msAudio,
+      wallStartedAt: payload.wallStartedAt,
     };
   }
   return { text: String(payload || '').trim(), lang: 'und', rawText: String(payload || '').trim() };
@@ -385,8 +386,10 @@ async function main() {
   let translating = false; // LLM translate in flight
   let speaking = false;
   let muteUntil = 0;
+  let ttsStartedAt = 0;
   let lastSpokenText = '';
   let recording = false; // live-translate / capture active
+  let translateEpoch = 0; // bump on stop to abandon queued jobs
   let sessionDir = null;
   let transcript = null;
   let retrieval = null;
@@ -465,6 +468,8 @@ async function main() {
     } else if (cmd === 'stop') {
       if (!recording) return notify('not currently translating.');
       recording = false;
+      translateEpoch += 1;
+      translateQueue.length = 0;
       if (sttStreams.meeting && typeof sttStreams.meeting.reset === 'function') {
         sttStreams.meeting.reset();
       }
@@ -544,26 +549,42 @@ async function main() {
     notify(`added "${name}" (${chunks.length} chunk(s)) — searchable for questions.`);
   }
 
-  function resetSttBuffers() {
+  function resetSttBuffers({ sources = null } = {}) {
     for (const source of Object.keys(sttStreams)) {
+      if (sources && !sources.includes(source)) continue;
       if (typeof sttStreams[source].reset === 'function') sttStreams[source].reset();
       partials[source] = '';
       utteranceStart[source] = null;
     }
   }
 
+  /** True when loopback is the same device that plays TTS (default speakers). */
+  function meetingLoopbackHearsTts() {
+    // Separate virtual cable capture ⇒ TTS on Kraken won't re-enter meeting STT.
+    if (opts.muteOriginal && opts.loopbackDevice) return false;
+    if (opts.loopbackDevice && opts.speakersDevice) {
+      const a = String(opts.loopbackDevice).toLowerCase();
+      const b = String(opts.speakersDevice).toLowerCase();
+      if (a && b && a !== b && !a.includes(b) && !b.includes(a)) return false;
+    }
+    return true;
+  }
+
   function isAudioMuted(source) {
-    // Only mute while WE are speaking (loopback would otherwise re-hear TTS).
-    // Do NOT mute during LLM translate — that dropped live Meet audio and made us late.
-    if (speaking || Date.now() < muteUntil) return true;
+    // Mic: always mute while we speak (avoid command echo).
+    if (source === 'you' && (speaking || Date.now() < muteUntil)) return true;
     if (source === 'meeting' && answering && opts.tts) return true;
+    // Meeting: only mute when loopback would hear our TTS.
+    if (source === 'meeting' && meetingLoopbackHearsTts() && (speaking || Date.now() < muteUntil)) {
+      return true;
+    }
     return false;
   }
 
   function normalizeEcho(s) {
     return String(s || '')
       .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
       .replace(/\s+/g, ' ')
       .trim();
   }
@@ -571,11 +592,11 @@ async function main() {
   function isEchoOfLastSpoken(text) {
     const a = normalizeEcho(lastSpokenText);
     const b = normalizeEcho(text);
-    if (!a || !b || a.length < 8) return false;
+    if (!a || !b || a.length < 6) return false;
     if (a === b) return true;
     if (a.includes(b) || b.includes(a)) return true;
-    const aw = new Set(a.split(' ').filter((w) => w.length > 2));
-    const bw = b.split(' ').filter((w) => w.length > 2);
+    const aw = new Set(a.split(' ').filter((w) => w.length > 1));
+    const bw = b.split(' ').filter((w) => w.length > 1);
     if (!bw.length) return false;
     let hit = 0;
     for (const w of bw) if (aw.has(w)) hit++;
@@ -585,8 +606,8 @@ async function main() {
   async function speakAnswer(text, { allowClip = true } = {}) {
     if (!tts || !text) return;
     let spoken = String(text).trim();
-    if (allowClip && spoken.length > 240) {
-      const cut = spoken.slice(0, 240);
+    if (allowClip && spoken.length > 220) {
+      const cut = spoken.slice(0, 220);
       const breakAt = Math.max(
         cut.lastIndexOf('. '),
         cut.lastIndexOf('! '),
@@ -597,16 +618,19 @@ async function main() {
     }
     lastSpokenText = spoken;
     speaking = true;
+    ttsStartedAt = Date.now();
     status.set('speak', spoken.slice(0, 48) + (spoken.length > 48 ? '…' : ''));
-    resetSttBuffers();
+    // Never wipe meeting audio that was buffered during LLM translate.
+    // Only reset mic; reset meeting only when loopback would ingest TTS.
+    resetSttBuffers({ sources: meetingLoopbackHearsTts() ? ['you', 'meeting'] : ['you'] });
     try {
       await tts.speak(spoken);
     } catch (err) {
       notify(`TTS playback failed: ${err.message}`);
     } finally {
       speaking = false;
-      resetSttBuffers();
-      muteUntil = Date.now() + 900;
+      resetSttBuffers({ sources: ['you'] });
+      muteUntil = Date.now() + (meetingLoopbackHearsTts() ? 700 : 250);
       if (recording) status.set('listen', `→ ${opts.to}`);
       else status.stop();
     }
@@ -704,6 +728,7 @@ async function main() {
 
   function enqueueMeetingTranslate({ text, lang, startedAt }) {
     const enqueuedAt = Date.now();
+    const epoch = translateEpoch;
     log.event('asr.final', { text, lang, startedAt });
     // Show what we heard immediately (before LLM), so silence isn't "nothing works".
     printLine(
@@ -722,9 +747,12 @@ async function main() {
     }
 
     translateQueue.push(async () => {
-      // Too old already (e.g. waited behind a long TTS) — captions only, no voice.
+      if (epoch !== translateEpoch || !recording) {
+        log.info('abandon translate job (stopped/superseded)');
+        return;
+      }
       const waited = Date.now() - enqueuedAt;
-      const stale = waited > 12000;
+      const stale = waited > 10000;
       ensureSessionState();
       const recentContext = transcript
         ? transcript
@@ -748,15 +776,22 @@ async function main() {
         notify(`translate failed: ${err.message}`);
         return;
       }
+      if (epoch !== translateEpoch || !recording) return;
+
       log.event('translate.done', {
         ms: Date.now() - enqueuedAt,
         fast: !!result.fast,
         lang: result.lang,
-        targetOk: result.targetOk !== false,
+        targetOk: !!result.targetOk,
         translation: result.translation,
         repaired: result.repaired,
       });
-      if (!result.translation && !result.repaired) {
+
+      const display =
+        result.targetOk && result.translation
+          ? result.translation
+          : result.repaired || text;
+      if (!display) {
         log.warn('translate returned empty');
         return;
       }
@@ -764,17 +799,25 @@ async function main() {
       const meta = {
         raw: text,
         repaired: result.repaired || text,
-        translation: result.translation || result.repaired || text,
+        translation: result.targetOk ? result.translation : '',
         srcLang: result.lang || lang || 'und',
-        tgtLang: opts.to,
+        tgtLang: result.targetOk ? opts.to : result.lang || lang || 'und',
       };
-      const seg = transcript.add(meta.translation, 'meeting', startedAt, meta);
+      const seg = transcript.add(display, 'meeting', startedAt, meta);
       retrieval.add(seg);
       summarizer.addSegment(seg);
       summarizer.maybeUpdate();
       const elapsed = Date.now() - enqueuedAt;
-      const canSpeak =
-        !!(tts && meta.translation && !stale && translateQueue.length === 0 && result.targetOk !== false);
+      // Speak only the latest completed line when still fresh + correct language.
+      const canSpeak = !!(
+        tts &&
+        result.targetOk &&
+        result.translation &&
+        !stale &&
+        translateQueue.length === 0 &&
+        epoch === translateEpoch &&
+        recording
+      );
       const pretty = formatFinalLine({
         line: seg.line,
         ms: elapsed,
@@ -783,12 +826,11 @@ async function main() {
       if (answering) deferredLines.push(pretty);
       else printLine(pretty);
 
-      // Voice only when caught up AND translation looks like the target language.
       if (!canSpeak) {
-        if (result.targetOk === false) {
+        if (!result.targetOk) {
           log.warn('skip TTS — translation not in target script/language', {
             to: opts.to,
-            translation: meta.translation.slice(0, 80),
+            sample: String(result.translation || display).slice(0, 80),
           });
         } else {
           log.info('skip TTS to stay live', { stale, queued: translateQueue.length });
@@ -796,7 +838,7 @@ async function main() {
         return;
       }
       try {
-        await speakAnswer(meta.translation);
+        await speakAnswer(result.translation);
       } catch (err) {
         log.error('TTS failed', err.message);
         notify(`TTS failed: ${err.message}`);
@@ -844,10 +886,15 @@ async function main() {
     });
 
     sttStream.on('final', (payload) => {
-      const { text, lang, rawText, msAudio } = normalizeFinalPayload(payload);
+      const { text, lang, rawText, msAudio, wallStartedAt } = normalizeFinalPayload(payload);
       const startedAt = utteranceStart[source] ?? (transcript ? transcript.elapsedNow() : Date.now());
       utteranceStart[source] = null;
       partials[source] = '';
+      const mutedNow = isAudioMuted(source);
+      // Keep finals that began BEFORE TTS — they are real Meet speech, not echo.
+      const startedBeforeTts =
+        Number.isFinite(wallStartedAt) && ttsStartedAt > 0 && wallStartedAt < ttsStartedAt - 50;
+      const dropForMute = mutedNow && !(source === 'meeting' && startedBeforeTts);
       log.event('asr.final.raw', {
         source,
         lang,
@@ -855,10 +902,11 @@ async function main() {
         rawText,
         scrubbed: !!(rawText && !text),
         msAudio,
-        muted: isAudioMuted(source),
+        muted: mutedNow,
+        keptDespiteMute: mutedNow && !dropForMute,
         recording,
       });
-      if (isAudioMuted(source)) return;
+      if (dropForMute) return;
       if (!recording && source === 'meeting') return;
       if (source === 'meeting' && text && isEchoOfLastSpoken(text)) {
         notify('(ignored meeting echo of my own voice)');
@@ -867,10 +915,6 @@ async function main() {
       if (!text) {
         if (source === 'meeting' && recording) {
           log.warn('empty ASR final for meeting — no translate', { rawText, lang, msAudio });
-          // Visible heartbeat so the terminal isn't "doing nothing".
-          printLine(
-            paint(c.dim, `· no speech text (${((msAudio || 0) / 1000).toFixed(1)}s, lang=${lang || '?'})`)
-          );
           status.set('listen', `→ ${opts.to}`);
         }
         return;
@@ -917,12 +961,13 @@ async function main() {
             language: opts.from || 'auto',
             // Partials steal the only GPU Whisper worker from finals → late voice.
             partials: false,
+            priority: 10, // meeting beats mic on the shared decode queue
             prompt:
               opts.from && opts.from !== 'auto'
                 ? `Meeting speech in ${opts.from}. Transcribe accurately.`
                 : 'Casual multilingual conversation, including Indian English accents. Transcribe exactly what was said.',
           }
-        : { language: 'en', prompt: MIC_PROMPT, partials: false };
+        : { language: 'en', prompt: MIC_PROMPT, partials: false, priority: 0 };
     const sttStream = stt.createStream(streamOpts);
     wireStream(sttStream, source);
     sttStreams[source] = sttStream;

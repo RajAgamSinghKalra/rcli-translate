@@ -16,6 +16,8 @@ Protocol v3 (binary, little-endian):
       float32[n_samples] # 16 kHz mono PCM
   response:
     uint32 n_bytes | utf-8 JSON {"lang":"xx","text":"..."}
+
+Live path uses greedy decode (fast). mode=1 finals use best_of=3.
 """
 from __future__ import annotations
 
@@ -263,15 +265,18 @@ def _transcribe(lib, ctx, samples, n_samples, lang_bytes, prompt_bytes, mode, n_
     use_prompt_first = lang_str not in ("auto", "detect", "")
     detected, text = run_once(lang_str, use_prompt=use_prompt_first)
 
-    # Retry if empty — auto can miss once; fixed lang can miss when they switched.
+    # Retry if empty — prefer another auto pass before forcing English.
     if not text and n_samples >= SAMPLE_RATE:
         retries = []
         if lang_str in ("auto", "detect", ""):
             retries = [("auto", False), ("en", False)]
         else:
-            retries = [("auto", False), ("en", False)]
+            retries = [("auto", False)]
             if lang_str not in ("en", "auto"):
                 retries.insert(0, (lang_str, False))
+            # Only force English when the caller asked for English.
+            if lang_str == "en":
+                retries.append(("en", False))
         seen = {(lang_str, use_prompt_first)}
         for fb_lang, fb_prompt in retries:
             key = (fb_lang, fb_prompt)

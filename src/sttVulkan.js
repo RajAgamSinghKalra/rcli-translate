@@ -9,7 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
-const { SAMPLE_RATE, ENERGY_THRESHOLD } = require('./vadEnergy');
+const { SAMPLE_RATE } = require('./vadEnergy');
 const { spawnPython } = require('./python');
 const { env } = require('./env');
 
@@ -29,11 +29,13 @@ const INITIAL_PROMPT =
 // Live partial cadence — meeting defaults skip partials (they steal GPU from finals).
 const PARTIAL_EVERY_MS = Number(env('PARTIAL_MS', '2000')) || 2000;
 const MIN_PARTIAL_AUDIO_MS = Number(env('MIN_PARTIAL_MS', '500')) || 500;
-const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '320')) || 320;
-// Short chunks keep voice near-live (long blobs = "talking about a minute ago").
-const MAX_UTTERANCE_MS = Number(env('VAD_MAX_MS', '4500')) || 4500;
+const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '450')) || 450;
+// Short enough to stay live, long enough for accented phrases.
+const MAX_UTTERANCE_MS = Number(env('VAD_MAX_MS', '5500')) || 5500;
 const ENERGY_GATE = Number(env('VAD_THRESHOLD', '0.0045')) || 0.0045;
 const ENABLE_PARTIALS = !/^(0|off|false|no)$/i.test(String(env('PARTIALS', '0')));
+// When force-cutting a long utterance, keep this much tail for the next chunk.
+const OVERLAP_MS = Number(env('VAD_OVERLAP_MS', '400')) || 400;
 
 const MODEL_URL =
   'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin';
@@ -82,22 +84,38 @@ function mergeChunks(chunks) {
 }
 
 /**
- * Decode queue: partials coalesce to the latest audio (drop stale), finals
- * always run after whatever is in flight so the commit isn't lost.
+ * Decode queue: partials coalesce to the latest audio (drop stale).
+ * Finals are FIFO (never overwrite an unresolved final — that lost captions).
+ * Meeting finals can pass priority > 0 to jump ahead of mic finals.
  */
 function createDecodeScheduler(decodeFn) {
   let busy = false;
-  let latestPartial = null; // { samples, prompt, language, resolve, reject }
-  let pendingFinal = null;
+  let latestPartial = null; // { samples, prompt, language, mode, resolve, reject }
+  const finalQueue = []; // FIFO of final jobs
+
+  function nextJob() {
+    if (finalQueue.length) {
+      // Higher priority first, else FIFO.
+      let best = 0;
+      for (let i = 1; i < finalQueue.length; i++) {
+        if ((finalQueue[i].priority || 0) > (finalQueue[best].priority || 0)) best = i;
+      }
+      return finalQueue.splice(best, 1)[0];
+    }
+    if (latestPartial) {
+      const job = latestPartial;
+      latestPartial = null;
+      return job;
+    }
+    return null;
+  }
 
   async function pump() {
     if (busy) return;
     busy = true;
     try {
-      while (latestPartial || pendingFinal) {
-        const job = pendingFinal || latestPartial;
-        if (job === pendingFinal) pendingFinal = null;
-        else latestPartial = null;
+      let job;
+      while ((job = nextJob())) {
         try {
           job.resolve(await decodeFn(job.samples, job.prompt, job.mode, job.language));
         } catch (err) {
@@ -106,7 +124,7 @@ function createDecodeScheduler(decodeFn) {
       }
     } finally {
       busy = false;
-      if (latestPartial || pendingFinal) void pump();
+      if (latestPartial || finalQueue.length) void pump();
     }
   }
 
@@ -118,9 +136,22 @@ function createDecodeScheduler(decodeFn) {
         void pump();
       });
     },
-    final(samples, prompt, language) {
+    final(samples, prompt, language, { priority = 0 } = {}) {
       return new Promise((resolve, reject) => {
-        pendingFinal = { samples, prompt, language, mode: 'final', resolve, reject };
+        finalQueue.push({
+          samples,
+          prompt,
+          language,
+          mode: 'final',
+          priority,
+          resolve,
+          reject,
+        });
+        // Cap backlog: keep newest high-priority + one other.
+        while (finalQueue.length > 3) {
+          const dropped = finalQueue.shift();
+          dropped.resolve({ lang: 'und', text: '', rawText: '' });
+        }
         void pump();
       });
     },
@@ -349,6 +380,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
     const streamLanguage = streamOpts.language || LANGUAGE || 'auto';
     const streamPrompt = streamOpts.prompt || INITIAL_PROMPT;
     const wantPartials = streamOpts.partials != null ? !!streamOpts.partials : ENABLE_PARTIALS;
+    const decodePriority = Number(streamOpts.priority) || 0;
 
     const chunks = [];
     let bufferedMs = 0;
@@ -358,7 +390,8 @@ function createSTTEngine(modelPath = MODEL_PATH) {
     let lastPartialText = '';
     let committedPrompt = ''; // prior finals -- conditions Whisper on meeting context
     let decodeGen = 0; // ignore stale async results after reset
-    let stickyLang = streamLanguage !== 'auto' ? streamLanguage : '';
+    // Soft hint only — never force sticky lang when user asked for auto (mid-call switches).
+    let lastHeardLang = streamLanguage !== 'auto' ? streamLanguage : '';
 
     function resetUtterance() {
       chunks.length = 0;
@@ -371,18 +404,38 @@ function createSTTEngine(modelPath = MODEL_PATH) {
     }
 
     function contextPrompt() {
-      // Keep this short — long committed prompts cause hallucination loops on accents.
       const tail = committedPrompt.slice(-120);
-      return [streamPrompt, tail].filter(Boolean).join(' ');
+      const hint =
+        streamLanguage === 'auto' && lastHeardLang
+          ? `(previous utterance sounded like ${lastHeardLang})`
+          : '';
+      return [streamPrompt, hint, tail].filter(Boolean).join(' ');
     }
 
     function decodeLanguage() {
+      // Always honor explicit --from; for auto always send auto so mid-call
+      // switches work (sticky was forcing wrong-language decode).
       if (streamLanguage && streamLanguage !== 'auto') return streamLanguage;
-      return stickyLang || 'auto';
+      return 'auto';
     }
 
     function snapshot() {
       return mergeChunks(chunks);
+    }
+
+    function keepOverlapTail() {
+      if (OVERLAP_MS <= 0 || !chunks.length) {
+        chunks.length = 0;
+        bufferedMs = 0;
+        return;
+      }
+      const keepSamples = Math.floor((OVERLAP_MS / 1000) * SAMPLE_RATE);
+      const all = mergeChunks(chunks);
+      if (all.length <= keepSamples) return;
+      const tail = all.subarray(all.length - keepSamples);
+      chunks.length = 0;
+      chunks.push(Float32Array.from(tail));
+      bufferedMs = OVERLAP_MS;
     }
 
     function requestPartial() {
@@ -401,7 +454,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
           const text = result.text || '';
           if (!text || text === lastPartialText) return;
           lastPartialText = text;
-          if (result.lang && result.lang !== 'und') stickyLang = result.lang;
+          if (result.lang && result.lang !== 'und') lastHeardLang = result.lang;
           emitter.emit('partial', text, result.lang || 'und');
         })
         .catch((err) => {
@@ -409,7 +462,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
         });
     }
 
-    function requestFinal() {
+    function requestFinal({ forceCut = false } = {}) {
       if (streamClosed || engineClosed) return;
       if (bufferedMs < 200) {
         resetUtterance();
@@ -418,17 +471,21 @@ function createSTTEngine(modelPath = MODEL_PATH) {
       const samples = snapshot();
       const prompt = contextPrompt();
       const lang = decodeLanguage();
+      const wallStartedAt = Date.now() - Math.round(bufferedMs);
       // Bump generation so any in-flight partial result is ignored.
       decodeGen++;
-      chunks.length = 0;
-      bufferedMs = 0;
+      if (forceCut) keepOverlapTail();
+      else {
+        chunks.length = 0;
+        bufferedMs = 0;
+      }
       silenceMs = 0;
-      speaking = false;
+      speaking = forceCut; // stay in speaking state across a hard cut
       lastPartialAt = 0;
       lastPartialText = '';
 
       scheduler
-        .final(samples, prompt, lang)
+        .final(samples, prompt, lang, { priority: decodePriority })
         .then((result) => {
           if (streamClosed || engineClosed) return;
           lastPartialText = '';
@@ -437,13 +494,14 @@ function createSTTEngine(modelPath = MODEL_PATH) {
           const rawText = (result && result.rawText) || t;
           if (t) {
             committedPrompt = t.slice(-120);
-            if (detected && detected !== 'und') stickyLang = detected;
+            if (detected && detected !== 'und') lastHeardLang = detected;
           }
           emitter.emit('final', {
             text: t,
             lang: detected,
             rawText,
             msAudio: Math.round((samples.length / SAMPLE_RATE) * 1000),
+            wallStartedAt,
           });
         })
         .catch((err) => {
@@ -489,7 +547,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
       }
 
       if (speaking && bufferedMs >= MAX_UTTERANCE_MS) {
-        requestFinal();
+        requestFinal({ forceCut: true });
       }
     };
 
@@ -535,6 +593,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
 
 module.exports = {
   createSTTEngine,
+  createDecodeScheduler,
   assertModelPresent,
   scrubHallucination,
   filterWhisperStderr,
@@ -542,4 +601,6 @@ module.exports = {
   MODEL_PATH,
   BIN_DIR,
   PARTIAL_EVERY_MS,
+  MAX_UTTERANCE_MS,
+  SILENCE_FINAL_MS,
 };
