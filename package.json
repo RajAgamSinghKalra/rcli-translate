@@ -1,0 +1,27 @@
+{
+  "name": "rcli-translate",
+  "version": "0.1.0",
+  "description": "Offline live meeting translator: auto-detect the other person's language, repair ASR with a local LLM, translate live, then ask questions over the bilingual transcript.",
+  "private": true,
+  "main": "src/main.js",
+  "bin": {
+    "rcli-translate": "src/main.js"
+  },
+  "scripts": {
+    "start": "node src/quiet.js",
+    "start:verbose": "node src/main.js",
+    "setup:stt-gpu": "powershell -ExecutionPolicy Bypass -File scripts/setup-stt-gpu.ps1",
+    "test": "node --test test/unit.test.js"
+  },
+  "dependencies": {
+    "sherpa-onnx-node": "^1.13.4"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RajAgamSinghKalra/rcli-translate.git"
+  },
+  "license": "MIT"
+}
