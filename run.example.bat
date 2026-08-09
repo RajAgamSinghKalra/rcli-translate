@@ -22,6 +22,11 @@ set "RCLI_XL8_OTHER=other"
 :: set "RCLI_XL8_WHISPER_BIN=D:/the_code/runanywhere/SDK/rcli-meet/bin/whisper"
 :: set "RCLI_XL8_WHISPER_MODEL=D:/the_code/runanywhere/SDK/rcli-meet/models/ggml-large-v3-turbo.bin"
 
+:: Mute original voice — hear only translations (needs VB-Audio Cable).
+:: set "RCLI_XL8_MUTE_ORIGINAL=1"
+:: set "RCLI_XL8_LOOPBACK=CABLE"
+:: set "RCLI_XL8_SPEAKERS=Kraken"
+
 cd /d "%~dp0"
 echo rcli-translate — live translate the other person, then ask questions.
 echo Commands: start / stop / save / load / add ^<path^> /quit

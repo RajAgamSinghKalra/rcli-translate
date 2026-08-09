@@ -82,6 +82,11 @@ Options:
   --mic-gain <n>       Software mic gain (default 1)
   --no-tts             Captions only — don't speak translations or answers
   --other <name>       Label for the other person (default: other)
+  --mute-original      Hide their voice in your ears; hear only the translation
+                       (requires a virtual cable — see README)
+  --loopback <name>    Speaker/virtual-cable to capture Meet from (e.g. CABLE)
+  --speakers <name>    Where to play translations (e.g. Kraken / Headphones)
+  --list-audio         List mics + speakers and exit
   --no-autostart       Wait for "start" instead of translating immediately
   -h, --help           Show this help
 
@@ -92,7 +97,11 @@ In-session:
   anything else        Ask a question over the bilingual transcript
   /quit                Exit
 
-Use headphones so your mic does not pick up translated TTS or Meet speakers.
+Mute-original tip: install VB-Audio Virtual Cable, set Chrome/Meet output to
+"CABLE Input", run with --mute-original --loopback CABLE --speakers Kraken.
+We hear them on the cable; you only hear the spoken translation on your headset.
+
+Use headphones so your mic does not pick up translated TTS.
 Latency after they finish speaking is typically ~1–3s (VAD + Whisper + LLM).
 
 Environment: RCLI_XL8_* (falls back to RCLI_MEET_*) — see README.md`;
@@ -111,6 +120,10 @@ function parseArgs(argv) {
     other: env('OTHER', 'other'),
     to: (env('TO', 'en') || 'en').toLowerCase(),
     autostart: true,
+    muteOriginal: /^(1|on|true|yes)$/i.test(env('MUTE_ORIGINAL', '')),
+    loopbackDevice: env('LOOPBACK', ''),
+    speakersDevice: env('SPEAKERS', ''),
+    listAudio: false,
   };
   const takeValue = (flag, i) => {
     const value = argv[i + 1];
@@ -142,10 +155,39 @@ function parseArgs(argv) {
     else if (arg === '--to') opts.to = takeValue(arg, i++).toLowerCase();
     else if (arg === '--no-tts') opts.tts = false;
     else if (arg === '--no-autostart') opts.autostart = false;
+    else if (arg === '--mute-original') opts.muteOriginal = true;
+    else if (arg === '--loopback') opts.loopbackDevice = takeValue(arg, i++);
+    else if (arg === '--speakers') opts.speakersDevice = takeValue(arg, i++);
+    else if (arg === '--list-audio') opts.listAudio = true;
     else throw new UsageError(`unknown option "${arg}"`);
+  }
+  // Mute-original needs a virtual cable capture path. Default to common names.
+  if (opts.muteOriginal && !opts.loopbackDevice) {
+    opts.loopbackDevice = 'CABLE';
   }
   opts.sourceLabels = resolveSourceLabels({ meeting: opts.other, you: 'you' });
   return opts;
+}
+
+function muteOriginalHelp(loopback, speakers) {
+  return [
+    '',
+    '  mute-original mode',
+    '  ──────────────────',
+    '  Windows cannot silence Meet on your headphones AND loopback the same',
+    '  device. Route Meet into a virtual cable; we listen there; you hear only TTS.',
+    '',
+    '  1) Install VB-Audio Virtual Cable (free): https://vb-audio.com/Cable/',
+    '     (Voicemeeter also works — use its VAIO / B1 device name.)',
+    '  2) In Chrome/Meet (or Windows app volume mixer): set output to "CABLE Input".',
+    '  3) Keep your headphones as the Windows DEFAULT playback device.',
+    `  4) Run with:  --mute-original --loopback ${loopback || 'CABLE'} --speakers ${speakers || 'Kraken'}`,
+    '  5) List devices:  node src/quiet.js --list-audio',
+    '',
+    `  Capturing Meet from:  ${loopback || 'CABLE'}`,
+    `  Playing translation on: ${speakers || '(Windows default speakers)'}`,
+    '',
+  ].join('\n');
 }
 
 function chunkText(text, maxChars = FILE_CHUNK_CHARS) {
@@ -190,6 +232,24 @@ async function main() {
     return;
   }
 
+  if (opts.listAudio) {
+    const { spawnSync } = require('child_process');
+    const { resolvePython, pythonArgs } = require('./python');
+    const script = path.join(__dirname, '..', 'capture_audio.py');
+    const exe = resolvePython();
+    const r = spawnSync(exe, pythonArgs([script, '--list-devices']), {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    process.stdout.write(r.stderr || r.stdout || '');
+    if (r.error) {
+      console.log(`[rcli-translate] could not list audio: ${r.error.message}`);
+      process.exit(1);
+    }
+    process.exit(r.status || 0);
+    return;
+  }
+
   assertModelPresent(MODEL_DIR);
 
   console.log('[rcli-translate] loading local engine (LLM + embedder, Vulkan)...');
@@ -212,12 +272,20 @@ async function main() {
   }
   console.log(`[rcli-translate] STT ready (engine: ${STT_ENGINE}).`);
 
-  const tts = opts.tts ? createTTS() : null;
+  const tts = opts.tts ? createTTS({ device: opts.speakersDevice }) : null;
   console.log(
     opts.tts
-      ? '[rcli-translate] TTS ready — translations (and Q&A answers) will be spoken.'
+      ? '[rcli-translate] TTS ready — translations (and Q&A answers) will be spoken' +
+          (opts.speakersDevice ? ` on "${opts.speakersDevice}"` : '') +
+          '.'
       : '[rcli-translate] TTS disabled (--no-tts).'
   );
+  if (opts.muteOriginal) {
+    process.stdout.write(muteOriginalHelp(opts.loopbackDevice, opts.speakersDevice));
+  }
+  if (opts.loopbackDevice) {
+    console.log(`[rcli-translate] meeting capture loopback device filter: "${opts.loopbackDevice}"`);
+  }
   if (opts.mic) {
     console.log(
       '[rcli-translate] mic capture enabled' +
@@ -685,7 +753,9 @@ async function main() {
         notify(message);
         notify(`${source} captions have stopped; other sources keep working.`);
       },
-      source === 'you' ? { device: opts.micName, gain: opts.micGain } : {}
+      source === 'you'
+        ? { device: opts.micName, gain: opts.micGain }
+        : { device: opts.loopbackDevice }
     );
   }
 

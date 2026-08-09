@@ -34,11 +34,16 @@ function startCapture(source, onSamples, onFatal = () => {}, opts = {}) {
   }
 
   const args = [SCRIPT, '--source', source];
-  const device = opts.device || process.env.RCLI_MEET_MIC || '';
-  if (source === 'mic' && device) {
+  const device =
+    opts.device ||
+    (source === 'mic'
+      ? process.env.RCLI_XL8_MIC || process.env.RCLI_MEET_MIC || ''
+      : process.env.RCLI_XL8_LOOPBACK || process.env.RCLI_MEET_LOOPBACK || '');
+  if (device) {
     args.push('--device', device);
   }
-  const gain = opts.gain ?? Number(process.env.RCLI_MEET_MIC_GAIN || '1');
+  const gain =
+    opts.gain ?? Number(process.env.RCLI_XL8_MIC_GAIN || process.env.RCLI_MEET_MIC_GAIN || '1');
   if (source === 'mic' && Number.isFinite(gain) && gain > 0 && gain !== 1) {
     args.push('--gain', String(gain));
   }
@@ -70,7 +75,7 @@ function startCapture(source, onSamples, onFatal = () => {}, opts = {}) {
     if (stopped) return;
     const hint =
       err.code === 'ENOENT'
-        ? `\n  Could not run Python. Set RCLI_MEET_PYTHON to your real python.exe` +
+        ? `\n  Could not run Python. Set RCLI_XL8_PYTHON to your real python.exe` +
           `\n  (on Windows, a bare "python" often resolves to the Store alias stub).`
         : '';
     onFatal(`could not start ${source} capture: ${err.message}${hint}`);

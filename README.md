@@ -4,6 +4,26 @@ Offline **live meeting translator** for Windows. Captures the other person in Go
 
 Forked from [rcli-meet](https://github.com/RajAgamSinghKalra/rcli-meet). Everything runs locally — nothing leaves your machine.
 
+## Mute their voice, hear only the translation
+
+Windows cannot mute Meet on your headphones **and** loopback that same device.
+Use a virtual cable:
+
+1. Install [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) (free).
+2. In Chrome / Meet, set **speaker output** to **CABLE Input**.
+3. Keep your real headset as the Windows **default** playback device.
+4. Run:
+
+```bat
+node src\quiet.js --mute-original --loopback CABLE --speakers Kraken --to en
+```
+
+- We capture Meet from the cable (you don't hear them).
+- We speak the translation on your headset (`--speakers`).
+- List names anytime: `node src\quiet.js --list-audio`
+
+Env equivalents: `RCLI_XL8_MUTE_ORIGINAL=1`, `RCLI_XL8_LOOPBACK=CABLE`, `RCLI_XL8_SPEAKERS=Kraken`.
+
 ## What you get
 
 1. **Live translate (default on launch)** — meeting/loopback audio → Whisper (language=`auto`) → LLM repair+translate → caption like `[00:01:12] [other/hi→en] …` + spoken English (unless `--no-tts`).

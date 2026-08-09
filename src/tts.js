@@ -5,12 +5,16 @@ const { spawnPython } = require('./python');
 const sherpa_onnx = require('./sherpa');
 
 const VOICE_DIR =
+  process.env.RCLI_XL8_TTS_MODEL_DIR ||
   process.env.RCLI_MEET_TTS_MODEL_DIR ||
   path.join(__dirname, '..', 'models', 'vits-piper-en_US-lessac-medium');
 
 const PLAY_SCRIPT = path.join(__dirname, '..', 'play_audio.py');
+const PLAYBACK_DEVICE =
+  process.env.RCLI_XL8_SPEAKERS || process.env.RCLI_MEET_SPEAKERS || '';
 
-function createTTS() {
+function createTTS(opts = {}) {
+  const playbackDevice = opts.device || PLAYBACK_DEVICE;
   const tts = new sherpa_onnx.OfflineTts({
     model: {
       vits: {
@@ -27,6 +31,7 @@ function createTTS() {
 
   return {
     sampleRate: tts.sampleRate,
+    playbackDevice,
 
     synthesize(text) {
       return tts.generate({ text, sid: 0, speed: 1.0 });
@@ -36,7 +41,9 @@ function createTTS() {
       if (closed || !text || !text.trim()) return Promise.resolve();
       const { samples, sampleRate } = this.synthesize(text);
       return new Promise((resolve) => {
-        const proc = spawnPython([PLAY_SCRIPT, String(sampleRate)], {
+        const args = [PLAY_SCRIPT, String(sampleRate)];
+        if (playbackDevice) args.push('--device', playbackDevice);
+        const proc = spawnPython(args, {
           stdio: ['pipe', 'ignore', 'pipe'],
         });
         proc.on('error', () => resolve());
