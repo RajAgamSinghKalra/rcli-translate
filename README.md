@@ -26,13 +26,15 @@ Env equivalents: `RCLI_XL8_MUTE_ORIGINAL=1`, `RCLI_XL8_LOOPBACK=CABLE`, `RCLI_XL
 
 ## What you get
 
-1. **Live translate (default on launch)** — meeting/loopback audio → Whisper (language=`auto`) → LLM repair+translate → caption like `[00:01:12] [other/hi→en] …` + spoken English (unless `--no-tts`).
-2. **Your mic** — captioned into the session (and spoken commands); not live-translated in v1.
-3. **After / during pause (`stop`)** — type or speak questions about what was said; answers use the translated transcript + rolling summary.
+1. **Live translate (default on launch)** — meeting/loopback audio → Whisper (`--from auto`) → LLM repair+translate → caption like `[00:01:12] [transcribing/en→hi] …` + spoken translation (Hindi Piper when `--to hi`; use `--no-tts` for captions-only speed).
+2. **Your mic** — paused during live translate (so GPU stays on Meet). After `stop`, mic is back for spoken Q&A.
+3. **After pause (`stop`)** — type or speak questions about what was said; answers use the translated transcript + rolling summary.
 
-Typical delay after they finish a sentence: **~0.7–2 seconds** when already in your language (fast path), or **~1–3 seconds** when translating (VAD + Whisper + LLM).
+Typical delay after they finish a sentence: **~1–3 seconds** (VAD + Whisper + LLM). Continuous speech is cut every ~5.5s so voice stays near-live; stale TTS is dropped.
 
-Live UI shows a spinner for listening / translating / speaking, colored partials, and timing on each final line.
+Useful flags: `--to hi`, `--from auto`, `--quality` (slower/more accurate Whisper), `--no-tts`, `--mute-original --loopback CABLE --speakers Kraken`.
+
+Live UI shows a spinner for listening / translating / speaking, last-ASR heartbeat, and timing on each final line.
 
 ## Requirements
 
