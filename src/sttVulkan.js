@@ -26,14 +26,14 @@ const INITIAL_PROMPT =
       'Short English commands: start, save, load, record, begin, stop.'
   );
 
-// Live partial cadence — snappy defaults (override with RCLI_XL8_PARTIAL_MS etc).
-const PARTIAL_EVERY_MS = Number(env('PARTIAL_MS', '700')) || 700;
-const MIN_PARTIAL_AUDIO_MS = Number(env('MIN_PARTIAL_MS', '350')) || 350;
-const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '380')) || 380;
-// Hard-cut continuous speech so we never sit on a 25s blob and speak it a minute late.
-const MAX_UTTERANCE_MS = Number(env('VAD_MAX_MS', '6500')) || 6500;
-// Slightly more sensitive so quiet Meet loopback still trips speech detection.
-const ENERGY_GATE = Number(env('VAD_THRESHOLD', '0.005')) || 0.005;
+// Live partial cadence — meeting defaults skip partials (they steal GPU from finals).
+const PARTIAL_EVERY_MS = Number(env('PARTIAL_MS', '2000')) || 2000;
+const MIN_PARTIAL_AUDIO_MS = Number(env('MIN_PARTIAL_MS', '500')) || 500;
+const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '320')) || 320;
+// Short chunks keep voice near-live (long blobs = "talking about a minute ago").
+const MAX_UTTERANCE_MS = Number(env('VAD_MAX_MS', '4500')) || 4500;
+const ENERGY_GATE = Number(env('VAD_THRESHOLD', '0.0045')) || 0.0045;
+const ENABLE_PARTIALS = !/^(0|off|false|no)$/i.test(String(env('PARTIALS', '0')));
 
 const MODEL_URL =
   'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin';
@@ -127,9 +127,9 @@ function createDecodeScheduler(decodeFn) {
   };
 }
 
-/** Strip common Whisper hallucinations on silence / music beds. */
+/** Strip common Whisper hallucinations on silence / music beds / loops. */
 function scrubHallucination(text) {
-  const t = String(text || '').trim();
+  let t = String(text || '').trim();
   if (!t) return '';
   const lower = t.toLowerCase();
   const junk = [
@@ -147,10 +147,20 @@ function scrubHallucination(text) {
     /^\(.*\)$/,
   ];
   if (junk.some((re) => re.test(t))) return '';
-  // Tiny fragments that are almost always noise
   if (t.length < 2) return '';
   if (/^(uh+|um+|ah+|hmm+)$/i.test(lower)) return '';
-  return t;
+
+  // Collapse obvious phrase loops: "foo. foo. foo." → "foo."
+  t = t.replace(/(.{8,80}?)(?:\s*\1){2,}/gi, '$1');
+  // Drop if still mostly the same 3–6 word phrase repeated.
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length >= 9) {
+    const chunk = words.slice(0, 4).join(' ').toLowerCase();
+    const joined = words.join(' ').toLowerCase();
+    const repeats = joined.split(chunk).length - 1;
+    if (chunk.length > 8 && repeats >= 3) return '';
+  }
+  return t.trim();
 }
 
 /** Drop per-utterance Whisper spam that was overwriting live captions. */
@@ -338,6 +348,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
     let streamClosed = false;
     const streamLanguage = streamOpts.language || LANGUAGE || 'auto';
     const streamPrompt = streamOpts.prompt || INITIAL_PROMPT;
+    const wantPartials = streamOpts.partials != null ? !!streamOpts.partials : ENABLE_PARTIALS;
 
     const chunks = [];
     let bufferedMs = 0;
@@ -347,6 +358,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
     let lastPartialText = '';
     let committedPrompt = ''; // prior finals -- conditions Whisper on meeting context
     let decodeGen = 0; // ignore stale async results after reset
+    let stickyLang = streamLanguage !== 'auto' ? streamLanguage : '';
 
     function resetUtterance() {
       chunks.length = 0;
@@ -359,8 +371,14 @@ function createSTTEngine(modelPath = MODEL_PATH) {
     }
 
     function contextPrompt() {
-      const tail = committedPrompt.slice(-240);
+      // Keep this short — long committed prompts cause hallucination loops on accents.
+      const tail = committedPrompt.slice(-120);
       return [streamPrompt, tail].filter(Boolean).join(' ');
+    }
+
+    function decodeLanguage() {
+      if (streamLanguage && streamLanguage !== 'auto') return streamLanguage;
+      return stickyLang || 'auto';
     }
 
     function snapshot() {
@@ -368,6 +386,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
     }
 
     function requestPartial() {
+      if (!wantPartials) return;
       if (streamClosed || engineClosed || !speaking) return;
       if (bufferedMs < MIN_PARTIAL_AUDIO_MS) return;
       const gen = decodeGen;
@@ -375,13 +394,14 @@ function createSTTEngine(modelPath = MODEL_PATH) {
       const started = Date.now();
       lastPartialAt = started;
       scheduler
-        .partial(samples, contextPrompt(), streamLanguage)
+        .partial(samples, contextPrompt(), decodeLanguage())
         .then((result) => {
           if (streamClosed || engineClosed || gen !== decodeGen) return;
           if (result == null) return; // superseded
           const text = result.text || '';
           if (!text || text === lastPartialText) return;
           lastPartialText = text;
+          if (result.lang && result.lang !== 'und') stickyLang = result.lang;
           emitter.emit('partial', text, result.lang || 'und');
         })
         .catch((err) => {
@@ -397,6 +417,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
       }
       const samples = snapshot();
       const prompt = contextPrompt();
+      const lang = decodeLanguage();
       // Bump generation so any in-flight partial result is ignored.
       decodeGen++;
       chunks.length = 0;
@@ -407,19 +428,20 @@ function createSTTEngine(modelPath = MODEL_PATH) {
       lastPartialText = '';
 
       scheduler
-        .final(samples, prompt, streamLanguage)
+        .final(samples, prompt, lang)
         .then((result) => {
           if (streamClosed || engineClosed) return;
           lastPartialText = '';
           const t = (result && result.text) || '';
-          const lang = (result && result.lang) || 'und';
+          const detected = (result && result.lang) || 'und';
           const rawText = (result && result.rawText) || t;
           if (t) {
-            committedPrompt = `${committedPrompt} ${t}`.trim().slice(-500);
+            committedPrompt = t.slice(-120);
+            if (detected && detected !== 'und') stickyLang = detected;
           }
           emitter.emit('final', {
             text: t,
-            lang,
+            lang: detected,
             rawText,
             msAudio: Math.round((samples.length / SAMPLE_RATE) * 1000),
           });

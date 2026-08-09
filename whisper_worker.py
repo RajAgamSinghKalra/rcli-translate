@@ -197,7 +197,8 @@ def _write_text(stream, text: str) -> None:
 
 
 def _transcribe(lib, ctx, samples, n_samples, lang_bytes, prompt_bytes, mode, n_threads):
-    strategy = WHISPER_SAMPLING_BEAM_SEARCH if mode == 1 else WHISPER_SAMPLING_GREEDY
+    # Live path: always greedy. Beam search is too slow and makes captions/voice late.
+    strategy = WHISPER_SAMPLING_GREEDY
 
     def run_once(lang_str: str, use_prompt: bool):
         params_ptr = lib.whisper_full_default_params_by_ref(strategy)
@@ -206,20 +207,19 @@ def _transcribe(lib, ctx, samples, n_samples, lang_bytes, prompt_bytes, mode, n_
         params.translate = False
         params.no_context = True
         params.no_timestamps = True
-        params.single_segment = mode == 0
+        params.single_segment = False
         params.print_special = False
         params.print_progress = False
         params.print_realtime = False
         params.print_timestamps = False
         # IMPORTANT: do NOT set detect_language=True — that path often returns
         # lang id with ZERO transcript segments on whisper.cpp Vulkan builds.
-        # Use language="auto" (or a fixed code) with detect_language=False.
         auto = lang_str in ("auto", "detect", "")
         params.language = b"auto" if auto else lang_str.encode("utf-8")
         params.detect_language = False
         if use_prompt and prompt_bytes:
             params.initial_prompt = prompt_bytes
-            params.carry_initial_prompt = True
+            params.carry_initial_prompt = False
         else:
             params.initial_prompt = None
             params.carry_initial_prompt = False
@@ -227,12 +227,12 @@ def _transcribe(lib, ctx, samples, n_samples, lang_bytes, prompt_bytes, mode, n_
         params.temperature_inc = 0.2
         params.suppress_blank = True
         params.suppress_nst = True
-        params.no_speech_thold = 0.4
-        if mode == 1:
-            params.beam_search.beam_size = 5
-            params.beam_search.patience = 1.0
-        else:
-            params.greedy.best_of = 1
+        # Slightly lower so quiet / accented speech is less often dropped as "no speech".
+        params.no_speech_thold = 0.5
+        params.entropy_thold = 2.8
+        params.logprob_thold = -1.0
+        # Finals: best_of=3 helps accents without beam-search latency.
+        params.greedy.best_of = 3 if mode == 1 else 1
 
         rc = lib.whisper_full(ctx, params, samples, n_samples)
         lib.whisper_free_params(params_ptr)

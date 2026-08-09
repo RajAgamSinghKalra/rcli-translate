@@ -3,21 +3,33 @@
 const { serialize, NO_THINK_DIRECTIVE, TRANSCRIPTION_CAVEAT } = require('./llm');
 
 const TRANSLATE_MAX_TOKENS =
-  Number(process.env.RCLI_XL8_TRANSLATE_TOKENS || process.env.RCLI_MEET_TRANSLATE_TOKENS) || 140;
-const TRANSLATE_TEMPERATURE = 0.15;
+  Number(process.env.RCLI_XL8_TRANSLATE_TOKENS || process.env.RCLI_MEET_TRANSLATE_TOKENS) || 96;
+const TRANSLATE_TEMPERATURE = 0.1;
 const ALWAYS_LLM = /^(1|on|true|yes)$/i.test(process.env.RCLI_XL8_ALWAYS_LLM || '');
+
+const LANG_NAMES = {
+  en: 'English',
+  hi: 'Hindi (हिन्दी, Devanagari script)',
+  es: 'Spanish',
+  fr: 'French',
+  de: 'German',
+  pt: 'Portuguese',
+  ja: 'Japanese',
+  ko: 'Korean',
+  zh: 'Chinese',
+  ar: 'Arabic',
+  ta: 'Tamil',
+  te: 'Telugu',
+};
 
 /** True when Whisper already labeled this as the target language. */
 function isAlreadyTargetLang(srcLangHint, to) {
   const a = String(srcLangHint || '').toLowerCase();
   const b = String(to || '').toLowerCase();
   if (!a || a === 'und' || !b) return false;
-  return a === b || (a.startsWith(b) || b.startsWith(a));
+  return a === b || a.startsWith(b) || b.startsWith(a);
 }
 
-/**
- * Lightweight cleanup without a full translate when source ≈ target.
- */
 function lightRepair(text) {
   return String(text || '')
     .replace(/\s+/g, ' ')
@@ -25,8 +37,25 @@ function lightRepair(text) {
     .trim();
 }
 
+/** Heuristic: does `text` look like it is written in target language `to`? */
+function looksLikeTargetLang(text, to) {
+  const t = String(text || '');
+  const code = String(to || '').toLowerCase().slice(0, 2);
+  if (!t.trim()) return false;
+  if (code === 'hi') return /[\u0900-\u097F]/.test(t);
+  if (code === 'zh') return /[\u4e00-\u9fff]/.test(t);
+  if (code === 'ja') return /[\u3040-\u30ff\u4e00-\u9fff]/.test(t);
+  if (code === 'ko') return /[\uac00-\ud7af]/.test(t);
+  if (code === 'ar') return /[\u0600-\u06ff]/.test(t);
+  if (code === 'ta') return /[\u0b80-\u0bff]/.test(t);
+  if (code === 'te') return /[\u0c00-\u0c7f]/.test(t);
+  // Latin targets: reject if mostly Devanagari/CJK (wrong direction).
+  if (code === 'en') return !/[\u0900-\u097F\u4e00-\u9fff]/.test(t);
+  return true;
+}
+
 /**
- * @param {{text: string, to?: string, srcLangHint?: string, recentContext?: string, disableThinking?: boolean}} opts
+ * @param {{text: string, to?: string, srcLangHint?: string, recentContext?: string, disableThinking?: boolean, strict?: boolean}} opts
  */
 function buildTranslatePrompt({
   text,
@@ -34,36 +63,34 @@ function buildTranslatePrompt({
   srcLangHint = '',
   recentContext = '',
   disableThinking = false,
+  strict = false,
 }) {
+  const targetName = LANG_NAMES[to] || to;
   const hint = srcLangHint
-    ? `Whisper guessed the source language code as "${srcLangHint}" (may be wrong — trust the text).`
-    : 'Source language is unknown — detect it from the text.';
+    ? `ASR language guess: "${srcLangHint}" (may be wrong — trust the words).`
+    : 'Detect the source language from the text.';
   const ctx = recentContext
-    ? `\nRecent meeting context (for disambiguation only):\n${recentContext}\n`
+    ? `\nRecent context:\n${recentContext}\n`
+    : '';
+  const strictLine = strict
+    ? `\nCRITICAL RETRY: Your previous answer was NOT in ${targetName}. translation MUST use the correct script for "${to}". For Hindi use Devanagari only (example: "क्या हो रहा है?"). Never reply in English/Indonesian/romanization when to=hi.\n`
     : '';
 
-  return `You repair live meeting speech-to-text and translate it into the user's language.
+  return `Translate live meeting ASR into ${targetName}. Be fast and literal.
 
 ${TRANSCRIPTION_CAVEAT}
-
 ${hint}
-The speaker may switch languages between utterances — always detect THIS utterance's language, then translate into "${to}".
-Target language code: ${to}
-${ctx}
-Raw ASR utterance:
+Source may change per utterance. Target code: ${to} = ${targetName}
+${strictLine}${ctx}
+ASR:
 """${text}"""
 
-Return ONLY a single JSON object (no markdown fences, no commentary) with keys:
-  "lang"         — ISO 639-1 source language code for THIS utterance (e.g. "hi", "en", "es")
-  "repaired"     — cleaned version in the SOURCE language (fix ASR errors; keep meaning; do not translate here)
-  "translation"  — natural ${to} translation of the repaired meaning
-
-If the utterance is already in ${to}, set lang accordingly, repaired ≈ cleaned original, and translation ≈ repaired.
-If the text is empty or pure noise, use lang "und", repaired "", translation "".
+Return ONLY JSON:
+{"lang":"<source-iso>","repaired":"<cleaned SOURCE text>","translation":"<${to} text>"}
+If already ${to}, translation ≈ repaired. If noise: lang "und", empty strings.
 ${disableThinking ? `\n${NO_THINK_DIRECTIVE}` : ''}`;
 }
 
-/** Extract first JSON object from model output (tolerates preamble / fences). */
 function parseTranslateJson(raw) {
   const text = String(raw || '').trim();
   if (!text) return null;
@@ -85,10 +112,20 @@ function parseTranslateJson(raw) {
   }
 }
 
+async function runTranslateOnce(llm, prompt, maxTokens) {
+  let raw = '';
+  for await (const token of llm.generate(prompt, {
+    maxTokens,
+    temperature: TRANSLATE_TEMPERATURE,
+  })) {
+    raw += token;
+  }
+  return { raw, parsed: parseTranslateJson(raw) };
+}
+
 /**
  * @param llm RunAnywhere LLMModel
  * @param opts {{text: string, to?: string, srcLangHint?: string, recentContext?: string, disableThinking?: boolean}}
- * @returns {Promise<{lang: string, repaired: string, translation: string, raw: string}>}
  */
 async function translateUtterance(llm, opts) {
   const text = String(opts.text || '').trim();
@@ -97,7 +134,6 @@ async function translateUtterance(llm, opts) {
     return { lang: opts.srcLangHint || 'und', repaired: '', translation: '', raw: '', fast: true };
   }
 
-  // Snappy path: already in target language → skip LLM (override with RCLI_XL8_ALWAYS_LLM=1).
   if (!ALWAYS_LLM && isAlreadyTargetLang(opts.srcLangHint, to)) {
     const cleaned = lightRepair(text);
     return {
@@ -109,23 +145,38 @@ async function translateUtterance(llm, opts) {
     };
   }
 
-  const prompt = buildTranslatePrompt({
-    text,
-    to,
-    srcLangHint: opts.srcLangHint || '',
-    recentContext: opts.recentContext || '',
-    disableThinking: !!opts.disableThinking,
-  });
-
   return serialize(async () => {
-    let raw = '';
-    for await (const token of llm.generate(prompt, {
-      maxTokens: TRANSLATE_MAX_TOKENS,
-      temperature: TRANSLATE_TEMPERATURE,
-    })) {
-      raw += token;
+    const baseOpts = {
+      text,
+      to,
+      srcLangHint: opts.srcLangHint || '',
+      recentContext: opts.recentContext || '',
+      disableThinking: !!opts.disableThinking,
+    };
+    let { raw, parsed } = await runTranslateOnce(
+      llm,
+      buildTranslatePrompt(baseOpts),
+      TRANSLATE_MAX_TOKENS
+    );
+
+    // Qwen sometimes ignores --to hi and returns English/Indonesian. Retry once hard.
+    if (
+      parsed &&
+      parsed.translation &&
+      !isAlreadyTargetLang(parsed.lang, to) &&
+      !looksLikeTargetLang(parsed.translation, to)
+    ) {
+      const retry = await runTranslateOnce(
+        llm,
+        buildTranslatePrompt({ ...baseOpts, strict: true, recentContext: '' }),
+        TRANSLATE_MAX_TOKENS
+      );
+      if (retry.parsed && retry.parsed.translation && looksLikeTargetLang(retry.parsed.translation, to)) {
+        raw = retry.raw;
+        parsed = retry.parsed;
+      }
     }
-    const parsed = parseTranslateJson(raw);
+
     if (parsed && (parsed.translation || parsed.repaired)) {
       return {
         lang: parsed.lang || opts.srcLangHint || 'und',
@@ -133,15 +184,16 @@ async function translateUtterance(llm, opts) {
         translation: parsed.translation || parsed.repaired || text,
         raw,
         fast: false,
+        targetOk: looksLikeTargetLang(parsed.translation || '', to) || isAlreadyTargetLang(parsed.lang, to),
       };
     }
-    // Fallback: treat ASR as already-target-language if JSON parse fails.
     return {
       lang: opts.srcLangHint || 'und',
       repaired: text,
       translation: text,
       raw,
       fast: false,
+      targetOk: false,
     };
   });
 }
@@ -151,6 +203,7 @@ module.exports = {
   parseTranslateJson,
   translateUtterance,
   isAlreadyTargetLang,
+  looksLikeTargetLang,
   lightRepair,
   TRANSLATE_MAX_TOKENS,
 };

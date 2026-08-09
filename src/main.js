@@ -342,14 +342,20 @@ async function main() {
 
   console.log(`[rcli-translate] debug log: ${log.latestPath}`);
 
-  const tts = opts.tts ? createTTS({ device: opts.speakersDevice }) : null;
+  const tts = opts.tts ? createTTS({ device: opts.speakersDevice, lang: opts.to }) : null;
   console.log(
     opts.tts
-      ? '[rcli-translate] TTS ready — translations (and Q&A answers) will be spoken' +
+      ? '[rcli-translate] TTS ready — translations spoken' +
+          (tts && tts.voiceLang ? ` in ${tts.voiceLang}` : '') +
           (opts.speakersDevice ? ` on "${opts.speakersDevice}"` : '') +
-          '.'
+          ' (generic voice, not a clone of the speaker).'
       : '[rcli-translate] TTS disabled (--no-tts).'
   );
+  if (tts && tts.missingVoiceFor) {
+    console.log(
+      `[rcli-translate] WARNING: no TTS pack for "${tts.missingVoiceFor}" — using English voice (will sound wrong).`
+    );
+  }
   if (opts.muteOriginal) {
     process.stdout.write(muteOriginalHelp(opts.loopbackDevice, opts.speakersDevice));
   }
@@ -746,6 +752,7 @@ async function main() {
         ms: Date.now() - enqueuedAt,
         fast: !!result.fast,
         lang: result.lang,
+        targetOk: result.targetOk !== false,
         translation: result.translation,
         repaired: result.repaired,
       });
@@ -766,18 +773,26 @@ async function main() {
       summarizer.addSegment(seg);
       summarizer.maybeUpdate();
       const elapsed = Date.now() - enqueuedAt;
+      const canSpeak =
+        !!(tts && meta.translation && !stale && translateQueue.length === 0 && result.targetOk !== false);
       const pretty = formatFinalLine({
         line: seg.line,
         ms: elapsed,
-        spoken: !!(tts && meta.translation && !stale && translateQueue.length === 0),
+        spoken: canSpeak,
       });
       if (answering) deferredLines.push(pretty);
       else printLine(pretty);
 
-      // Voice only when caught up — never narrate a backlog from a minute ago.
-      if (!tts || !meta.translation) return;
-      if (stale || translateQueue.length > 0) {
-        log.info('skip TTS to stay live', { stale, queued: translateQueue.length });
+      // Voice only when caught up AND translation looks like the target language.
+      if (!canSpeak) {
+        if (result.targetOk === false) {
+          log.warn('skip TTS — translation not in target script/language', {
+            to: opts.to,
+            translation: meta.translation.slice(0, 80),
+          });
+        } else {
+          log.info('skip TTS to stay live', { stale, queued: translateQueue.length });
+        }
         return;
       }
       try {
@@ -900,12 +915,14 @@ async function main() {
       source === 'meeting'
         ? {
             language: opts.from || 'auto',
+            // Partials steal the only GPU Whisper worker from finals → late voice.
+            partials: false,
             prompt:
               opts.from && opts.from !== 'auto'
                 ? `Meeting speech in ${opts.from}. Transcribe accurately.`
-                : 'Live multilingual meeting speech. Detect the spoken language and transcribe accurately in that language. Language may change mid-conversation.',
+                : 'Casual multilingual conversation, including Indian English accents. Transcribe exactly what was said.',
           }
-        : { language: 'en', prompt: MIC_PROMPT };
+        : { language: 'en', prompt: MIC_PROMPT, partials: false };
     const sttStream = stt.createStream(streamOpts);
     wireStream(sttStream, source);
     sttStreams[source] = sttStream;

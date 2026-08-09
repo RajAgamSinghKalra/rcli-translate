@@ -326,7 +326,11 @@ test('parseTranslateJson extracts lang/repaired/translation', () => {
   const parsed = parseTranslateJson('Here you go:\n{"lang":"hi","repaired":"ठीक है","translation":"Okay"}\n');
   assert.deepStrictEqual(parsed, { lang: 'hi', repaired: 'ठीक है', translation: 'Okay' });
   const prompt = buildTranslatePrompt({ text: 'hola', to: 'en', srcLangHint: 'es' });
-  assert.match(prompt, /Target language code: en/);
+  assert.match(prompt, /Target code: en/);
+  const { looksLikeTargetLang } = require('../src/translate');
+  assert.ok(looksLikeTargetLang('क्या हो रहा है?', 'hi'));
+  assert.ok(!looksLikeTargetLang('What is going on?', 'hi'));
+  assert.ok(looksLikeTargetLang('What is going on?', 'en'));
   assert.match(prompt, /"hola"/);
   assert.ok(isAlreadyTargetLang('en', 'en'));
   assert.ok(!isAlreadyTargetLang('hi', 'en'));
@@ -965,6 +969,12 @@ test('scrubHallucination drops common Whisper silence hallucinations', () => {
   assert.strictEqual(scrubHallucination('Thanks for watching.'), '');
   assert.strictEqual(scrubHallucination('Clear conversation.'), '');
   assert.strictEqual(scrubHallucination('uh'), '');
+  assert.strictEqual(
+    scrubHallucination(
+      'You are the son of a bitch. You are the son of a bitch. You are the son of a bitch.'
+    ),
+    'You are the son of a bitch.'
+  );
 });
 
 test('scrubHallucination keeps real meeting speech', () => {
