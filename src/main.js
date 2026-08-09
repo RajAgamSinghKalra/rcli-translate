@@ -78,6 +78,7 @@ Options:
                        (default: en). Common: en hi es fr de pt ja ko zh ar ta te
   --from <lang>        Their spoken language (default: auto = detect per utterance,
                        including mid-call switches). Override with en/hi/… if needed.
+  --quality            Slower Whisper finals (best_of=3) for harder accents
   --pick-to            Interactive menu to choose --to at startup
   --minutes <n>        Recency window for Q&A (default: 20)
   --llm <id|path>      RunAnywhere LLM catalog id or local GGUF path
@@ -133,6 +134,7 @@ function parseArgs(argv) {
     speakersDevice: env('SPEAKERS', ''),
     listAudio: false,
     pickTo: false,
+    quality: false,
   };
   const takeValue = (flag, i) => {
     const value = argv[i + 1];
@@ -170,7 +172,11 @@ function parseArgs(argv) {
     else if (arg === '--speakers') opts.speakersDevice = takeValue(arg, i++);
     else if (arg === '--list-audio') opts.listAudio = true;
     else if (arg === '--pick-to') opts.pickTo = true;
+    else if (arg === '--quality') opts.quality = true;
     else throw new UsageError(`unknown option "${arg}"`);
+  }
+  if (opts.quality) {
+    process.env.RCLI_XL8_WHISPER_BEST_OF = process.env.RCLI_XL8_WHISPER_BEST_OF || '3';
   }
   // Mute-original needs a virtual cable capture path. Default to common names.
   if (opts.muteOriginal && !opts.loopbackDevice) {
@@ -376,7 +382,8 @@ async function main() {
     );
   }
   console.log(
-    `[rcli-translate] translating meeting (auto-detect their language) → ${opts.to}; other labeled [${opts.sourceLabels.meeting}].`
+    `[rcli-translate] translating meeting (auto-detect their language) → ${opts.to}; other labeled [${opts.sourceLabels.meeting}].` +
+      (opts.quality ? ' [quality Whisper]' : '')
   );
 
   const rl = readline.createInterface({
@@ -394,6 +401,7 @@ async function main() {
   let lastSpokenText = '';
   let recording = false; // live-translate / capture active
   let translateEpoch = 0; // bump on stop to abandon queued jobs
+  let translateJobToken = 0; // bump when a newer utterance supersedes in-flight LLM
   let speakEpoch = 0; // bump to cancel/supersede TTS
   let lastMeetingAsrAt = 0;
   let sessionDir = null;
@@ -766,11 +774,13 @@ async function main() {
     status.set('translate', lang && lang !== 'und' ? `${lang} → ${opts.to}` : `→ ${opts.to}`);
 
     // Stay live: never pile up old speech. Keep at most one waiting job.
+    // Also bump a job token so an in-flight LLM can be abandoned after it returns.
     if (translateQueue.length > 0) {
       const dropped = translateQueue.length;
       translateQueue.length = 0;
       log.warn('dropped stale translate jobs to stay live', { n: dropped });
     }
+    const jobToken = ++translateJobToken;
 
     translateQueue.push(async () => {
       if (epoch !== translateEpoch || !recording) {
@@ -804,7 +814,12 @@ async function main() {
         notify(`translate failed: ${err.message}`);
         return;
       }
-      if (epoch !== translateEpoch || !recording) return;
+      // A newer utterance started translating — drop this result (except we already
+      // paid for LLM; still skip caption/TTS to stay live).
+      if (jobToken !== translateJobToken || epoch !== translateEpoch || !recording) {
+        log.info('discard superseded translate result');
+        return;
+      }
 
       log.event('translate.done', {
         ms: Date.now() - enqueuedAt,
