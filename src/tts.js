@@ -34,7 +34,7 @@ function createTTS(opts = {}) {
     playbackDevice,
 
     synthesize(text) {
-      return tts.generate({ text, sid: 0, speed: 1.0 });
+      return tts.generate({ text, sid: 0, speed: 1.15 });
     },
 
     speak(text) {

@@ -27,10 +27,11 @@ const INITIAL_PROMPT =
   );
 
 // Live partial cadence — snappy defaults (override with RCLI_XL8_PARTIAL_MS etc).
-const PARTIAL_EVERY_MS = Number(env('PARTIAL_MS', '800')) || 800;
-const MIN_PARTIAL_AUDIO_MS = Number(env('MIN_PARTIAL_MS', '400')) || 400;
-const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '550')) || 550;
-const MAX_UTTERANCE_MS = Number(env('VAD_MAX_MS', '25000')) || 25000;
+const PARTIAL_EVERY_MS = Number(env('PARTIAL_MS', '700')) || 700;
+const MIN_PARTIAL_AUDIO_MS = Number(env('MIN_PARTIAL_MS', '350')) || 350;
+const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '380')) || 380;
+// Hard-cut continuous speech so we never sit on a 25s blob and speak it a minute late.
+const MAX_UTTERANCE_MS = Number(env('VAD_MAX_MS', '6500')) || 6500;
 // Slightly more sensitive so quiet Meet loopback still trips speech detection.
 const ENERGY_GATE = Number(env('VAD_THRESHOLD', '0.005')) || 0.005;
 

@@ -108,6 +108,7 @@ We hear them on the cable; you only hear the spoken translation on your headset.
 
 Use headphones so your mic does not pick up translated TTS.
 Latency after they finish speaking is typically ~1–3s (VAD + Whisper + LLM).
+Continuous speech is cut every ~6.5s so voice stays near live (stale TTS is dropped).
 
 Environment: RCLI_XL8_* (falls back to RCLI_MEET_*) — see README.md`;
 
@@ -546,8 +547,10 @@ async function main() {
   }
 
   function isAudioMuted(source) {
+    // Only mute while WE are speaking (loopback would otherwise re-hear TTS).
+    // Do NOT mute during LLM translate — that dropped live Meet audio and made us late.
     if (speaking || Date.now() < muteUntil) return true;
-    if (source === 'meeting' && (answering || translating) && opts.tts) return true;
+    if (source === 'meeting' && answering && opts.tts) return true;
     return false;
   }
 
@@ -573,20 +576,31 @@ async function main() {
     return hit / bw.length >= 0.6;
   }
 
-  async function speakAnswer(text) {
+  async function speakAnswer(text, { allowClip = true } = {}) {
     if (!tts || !text) return;
-    lastSpokenText = text;
+    let spoken = String(text).trim();
+    if (allowClip && spoken.length > 240) {
+      const cut = spoken.slice(0, 240);
+      const breakAt = Math.max(
+        cut.lastIndexOf('. '),
+        cut.lastIndexOf('! '),
+        cut.lastIndexOf('? '),
+        cut.lastIndexOf('। ')
+      );
+      spoken = (breakAt > 60 ? cut.slice(0, breakAt + 1) : cut).trim() + '…';
+    }
+    lastSpokenText = spoken;
     speaking = true;
-    status.set('speak', text.slice(0, 48) + (text.length > 48 ? '…' : ''));
+    status.set('speak', spoken.slice(0, 48) + (spoken.length > 48 ? '…' : ''));
     resetSttBuffers();
     try {
-      await tts.speak(text);
+      await tts.speak(spoken);
     } catch (err) {
       notify(`TTS playback failed: ${err.message}`);
     } finally {
       speaking = false;
       resetSttBuffers();
-      muteUntil = Date.now() + 1800;
+      muteUntil = Date.now() + 900;
       if (recording) status.set('listen', `→ ${opts.to}`);
       else status.stop();
     }
@@ -683,7 +697,7 @@ async function main() {
   }
 
   function enqueueMeetingTranslate({ text, lang, startedAt }) {
-    const t0 = Date.now();
+    const enqueuedAt = Date.now();
     log.event('asr.final', { text, lang, startedAt });
     // Show what we heard immediately (before LLM), so silence isn't "nothing works".
     printLine(
@@ -692,16 +706,28 @@ async function main() {
         text
     );
     status.set('translate', lang && lang !== 'und' ? `${lang} → ${opts.to}` : `→ ${opts.to}`);
+
+    // Stay live: never pile up old speech. Keep at most one waiting job.
+    if (translateQueue.length > 0) {
+      const dropped = translateQueue.length;
+      translateQueue.length = 0;
+      log.warn('dropped stale translate jobs to stay live', { n: dropped });
+      notify(`skipped ${dropped} old line(s) to stay live`);
+    }
+
     translateQueue.push(async () => {
+      // Too old already (e.g. waited behind a long TTS) — captions only, no voice.
+      const waited = Date.now() - enqueuedAt;
+      const stale = waited > 12000;
       ensureSessionState();
       const recentContext = transcript
         ? transcript
             .lastMinutes(3)
-            .slice(-6)
+            .slice(-4)
             .map((s) => s.line)
             .join('\n')
         : '';
-      log.event('translate.start', { text, lang, to: opts.to });
+      log.event('translate.start', { text, lang, to: opts.to, waitedMs: waited, stale });
       let result;
       try {
         result = await translateUtterance(engine.llm, {
@@ -717,7 +743,7 @@ async function main() {
         return;
       }
       log.event('translate.done', {
-        ms: Date.now() - t0,
+        ms: Date.now() - enqueuedAt,
         fast: !!result.fast,
         lang: result.lang,
         translation: result.translation,
@@ -739,14 +765,21 @@ async function main() {
       retrieval.add(seg);
       summarizer.addSegment(seg);
       summarizer.maybeUpdate();
-      const elapsed = Date.now() - t0;
+      const elapsed = Date.now() - enqueuedAt;
       const pretty = formatFinalLine({
         line: seg.line,
         ms: elapsed,
-        spoken: !!(tts && meta.translation),
+        spoken: !!(tts && meta.translation && !stale && translateQueue.length === 0),
       });
       if (answering) deferredLines.push(pretty);
       else printLine(pretty);
+
+      // Voice only when caught up — never narrate a backlog from a minute ago.
+      if (!tts || !meta.translation) return;
+      if (stale || translateQueue.length > 0) {
+        log.info('skip TTS to stay live', { stale, queued: translateQueue.length });
+        return;
+      }
       try {
         await speakAnswer(meta.translation);
       } catch (err) {
