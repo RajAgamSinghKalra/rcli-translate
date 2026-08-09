@@ -357,6 +357,10 @@ async function main() {
       `[rcli-translate] WARNING: no TTS pack for "${tts.missingVoiceFor}" — using English voice (will sound wrong).`
     );
   }
+  // Warm the playback server so the first spoken line isn't cold.
+  if (tts && typeof tts.warm === 'function') {
+    void tts.warm().catch(() => {});
+  }
   if (opts.muteOriginal) {
     process.stdout.write(muteOriginalHelp(opts.loopbackDevice, opts.speakersDevice));
   }
@@ -784,11 +788,12 @@ async function main() {
             .join(' | ')
             .slice(0, 220)
         : '';
-      log.event('translate.start', { text, lang, to: opts.to, waitedMs: waited, stale });
+      const asrText = text.length > 360 ? text.slice(0, 360).trim() + '…' : text;
+      log.event('translate.start', { text: asrText, lang, to: opts.to, waitedMs: waited, stale });
       let result;
       try {
         result = await translateUtterance(engine.llm, {
-          text,
+          text: asrText,
           to: opts.to,
           srcLangHint: lang,
           recentContext,
@@ -845,7 +850,13 @@ async function main() {
         spoken: canSpeak,
       });
       if (answering) deferredLines.push(pretty);
-      else printLine(pretty);
+      else {
+        printLine(pretty);
+        // Show source ASR under the translation when it differs (debug + trust).
+        if (result.targetOk && result.repaired && result.repaired !== display) {
+          printLine(paint(c.dim, `  ↳ ${result.repaired.slice(0, 140)}${result.repaired.length > 140 ? '…' : ''}`));
+        }
+      }
 
       if (!canSpeak) {
         if (!result.targetOk) {

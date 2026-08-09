@@ -156,12 +156,23 @@ function createTTS(opts = {}) {
     missingVoiceFor: pack.missing || null,
 
     synthesize(text) {
-      return tts.generate({ text, sid: 0, speed: 1.25 });
+      const cleaned = String(text || '').trim();
+      // Tiny warmup / empty should not synthesize.
+      if (!cleaned) return { samples: new Float32Array(0), sampleRate: tts.sampleRate };
+      return tts.generate({ text: cleaned, sid: 0, speed: 1.25 });
+    },
+
+    /** Open the speaker process early (no audio). */
+    warm() {
+      if (closed) return Promise.resolve();
+      return ensureServer(tts.sampleRate);
     },
 
     speak(text) {
-      if (closed || !text || !text.trim()) return Promise.resolve();
-      const { samples, sampleRate } = this.synthesize(text);
+      if (closed || !text || !String(text).trim()) return Promise.resolve();
+      const synth = this.synthesize(text);
+      if (!synth.samples || !synth.samples.length) return Promise.resolve();
+      const { samples, sampleRate } = synth;
       // Serialize playback so lines don't overlap into gibberish.
       playChain = playChain
         .catch(() => {})
