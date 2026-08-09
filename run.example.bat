@@ -4,13 +4,13 @@ setlocal
 :: Copy this file to run.bat and fill in the paths for your machine.
 
 :: Path to your @runanywhere/electron dist/ build.
-set "RCLI_XL8_SDK_DIST=C:/path/to/runanywhere-electron/dist"
+set "RCLI_XL8_SDK_DIST=D:/the_code/runanywhere/SDK/runanywhere-sdks-main/sdk/runanywhere-electron/dist"
 
 :: RunAnywhere LLM catalog id or local GGUF path.
-set "RCLI_XL8_LLM_PATH=qwen2.5-3b"
+set "RCLI_XL8_LLM_PATH=D:/the_code/gpu-bench-qwen3/Qwen3-4B-Q4_K_M.gguf"
 
 :: Optional: real python.exe if `python` is the Windows Store stub.
-set "RCLI_XL8_PYTHON=python"
+set "RCLI_XL8_PYTHON=C:/Users/rajag/AppData/Local/Programs/Python/Python314/python.exe"
 
 :: Target language for live translations (default en).
 set "RCLI_XL8_TO=en"

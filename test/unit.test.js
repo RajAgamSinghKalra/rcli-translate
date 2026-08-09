@@ -973,3 +973,13 @@ test('scrubHallucination keeps real meeting speech', () => {
     'We will ship the build on Friday'
   );
 });
+
+test('filterWhisperStderr drops auto-detect spam', () => {
+  const { filterWhisperStderr } = require('../src/sttVulkan');
+  const noisy =
+    'whisper_full_with_state: auto-detected language: en (p = 0.99)\n' +
+    '[whisper-worker] ready\n';
+  const cleaned = filterWhisperStderr(noisy);
+  assert.ok(!/auto-detected/i.test(cleaned));
+  assert.match(cleaned, /ready/);
+});

@@ -151,6 +151,20 @@ function scrubHallucination(text) {
   return t;
 }
 
+/** Drop per-utterance Whisper spam that was overwriting live captions. */
+function filterWhisperStderr(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .filter((line) => {
+      if (!line.trim()) return false;
+      if (/auto-detected language/i.test(line)) return false;
+      if (/whisper_full_with_state/i.test(line)) return false;
+      if (/whisper_full:/i.test(line)) return false;
+      return true;
+    })
+    .join('\n');
+}
+
 function createSTTEngine(modelPath = MODEL_PATH) {
   assertModelPresent(modelPath);
 
@@ -204,7 +218,8 @@ function createSTTEngine(modelPath = MODEL_PATH) {
   proc.stderr.on('data', (chunk) => {
     const text = String(chunk);
     stderrTail = (stderrTail + text).slice(-4000);
-    process.stdout.write(`[whisper-gpu] ${text}`);
+    const visible = filterWhisperStderr(text);
+    if (visible.trim()) process.stdout.write(`[whisper-gpu] ${visible}`);
     if (/\[whisper-worker\] ready/i.test(text)) markReady();
     if (/failed|error/i.test(text) && /whisper_init|failed to get context/i.test(text)) {
       markFailed(new Error(text.trim()));
@@ -489,6 +504,7 @@ module.exports = {
   createSTTEngine,
   assertModelPresent,
   scrubHallucination,
+  filterWhisperStderr,
   SAMPLE_RATE,
   MODEL_PATH,
   BIN_DIR,

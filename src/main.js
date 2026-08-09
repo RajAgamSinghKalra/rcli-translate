@@ -74,6 +74,8 @@ Usage: node src/main.js [options]
 
 Options:
   --to <lang>          Target language code for translations (default: en)
+                       Common: en, hi, es, fr, de, pt, ja, ko, zh, ar, ta, te
+  --pick-to            Interactive menu to choose --to at startup
   --minutes <n>        Recency window for Q&A (default: 20)
   --llm <id|path>      RunAnywhere LLM catalog id or local GGUF path
   --embedder <id>      RunAnywhere embedder catalog id
@@ -81,7 +83,7 @@ Options:
   --mic <name>         Substring to pick a mic (e.g. "Razer")
   --mic-gain <n>       Software mic gain (default 1)
   --no-tts             Captions only — don't speak translations or answers
-  --other <name>       Label for the other person (default: other)
+  --other <name>       Caption label for the other person (default: transcribing)
   --mute-original      Hide their voice in your ears; hear only the translation
                        (requires a virtual cable — see README)
   --loopback <name>    Speaker/virtual-cable to capture Meet from (e.g. CABLE)
@@ -117,13 +119,14 @@ function parseArgs(argv) {
     tts: true,
     micName: env('MIC', ''),
     micGain: Number(env('MIC_GAIN', '1')) || 1,
-    other: env('OTHER', 'other'),
+    other: env('OTHER', 'transcribing'),
     to: (env('TO', 'en') || 'en').toLowerCase(),
     autostart: true,
     muteOriginal: /^(1|on|true|yes)$/i.test(env('MUTE_ORIGINAL', '')),
     loopbackDevice: env('LOOPBACK', ''),
     speakersDevice: env('SPEAKERS', ''),
     listAudio: false,
+    pickTo: false,
   };
   const takeValue = (flag, i) => {
     const value = argv[i + 1];
@@ -159,6 +162,7 @@ function parseArgs(argv) {
     else if (arg === '--loopback') opts.loopbackDevice = takeValue(arg, i++);
     else if (arg === '--speakers') opts.speakersDevice = takeValue(arg, i++);
     else if (arg === '--list-audio') opts.listAudio = true;
+    else if (arg === '--pick-to') opts.pickTo = true;
     else throw new UsageError(`unknown option "${arg}"`);
   }
   // Mute-original needs a virtual cable capture path. Default to common names.
@@ -173,12 +177,12 @@ function muteOriginalHelp(loopback, speakers) {
   return [
     '',
     '  mute-original mode',
-    '  ──────────────────',
+    '  ------------------',
     '  Windows cannot silence Meet on your headphones AND loopback the same',
     '  device. Route Meet into a virtual cable; we listen there; you hear only TTS.',
     '',
     '  1) Install VB-Audio Virtual Cable (free): https://vb-audio.com/Cable/',
-    '     (Voicemeeter also works — use its VAIO / B1 device name.)',
+    '     (Voicemeeter also works -- use its VAIO / B1 device name.)',
     '  2) In Chrome/Meet (or Windows app volume mixer): set output to "CABLE Input".',
     '  3) Keep your headphones as the Windows DEFAULT playback device.',
     `  4) Run with:  --mute-original --loopback ${loopback || 'CABLE'} --speakers ${speakers || 'Kraken'}`,
@@ -188,6 +192,42 @@ function muteOriginalHelp(loopback, speakers) {
     `  Playing translation on: ${speakers || '(Windows default speakers)'}`,
     '',
   ].join('\n');
+}
+
+const TO_MENU = [
+  { code: 'en', label: 'English' },
+  { code: 'hi', label: 'Hindi' },
+  { code: 'es', label: 'Spanish' },
+  { code: 'fr', label: 'French' },
+  { code: 'de', label: 'German' },
+  { code: 'pt', label: 'Portuguese' },
+  { code: 'ja', label: 'Japanese' },
+  { code: 'ko', label: 'Korean' },
+  { code: 'zh', label: 'Chinese' },
+  { code: 'ar', label: 'Arabic' },
+  { code: 'ta', label: 'Tamil' },
+  { code: 'te', label: 'Telugu' },
+];
+
+/** Ask the user which language to translate into (TTY only). */
+async function pickTargetLanguage(current = 'en') {
+  if (!process.stdin.isTTY) return current;
+  const rlPick = readline.createInterface({ input: process.stdin, output: process.stdout });
+  process.stdout.write('\nTranslate their speech into which language?\n');
+  TO_MENU.forEach((row, i) => {
+    const mark = row.code === current ? ' (current)' : '';
+    process.stdout.write(`  ${String(i + 1).padStart(2)}. ${row.code}  ${row.label}${mark}\n`);
+  });
+  const answer = await new Promise((resolve) => {
+    rlPick.question('  or type a language code (e.g. en, hi)\n> ', resolve);
+  });
+  rlPick.close();
+  const raw = String(answer || '').trim().toLowerCase();
+  if (!raw) return current;
+  const idx = Number(raw) - 1;
+  if (Number.isInteger(idx) && TO_MENU[idx]) return TO_MENU[idx].code;
+  if (/^[a-z]{2,8}$/.test(raw)) return raw;
+  return current;
 }
 
 function chunkText(text, maxChars = FILE_CHUNK_CHARS) {
@@ -248,6 +288,11 @@ async function main() {
     }
     process.exit(r.status || 0);
     return;
+  }
+
+  if (opts.pickTo) {
+    opts.to = await pickTargetLanguage(opts.to);
+    console.log(`[rcli-translate] translating into: ${opts.to}`);
   }
 
   assertModelPresent(MODEL_DIR);
