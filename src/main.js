@@ -40,6 +40,15 @@ const {
   CONTEXT_TOKEN_BUDGET,
 } = require('./llm');
 const { translateUtterance } = require('./translate');
+const {
+  banner,
+  formatPartialLine,
+  formatFinalLine,
+  createStatusLine,
+  fitOneRow,
+  paint,
+  c,
+} = require('./ui');
 
 const DEFAULT_MODEL_DIRS = {
   vulkan: path.join(__dirname, '..', 'models', 'ggml-large-v3-turbo.bin'),
@@ -246,8 +255,10 @@ async function main() {
   const captures = {};
   const translateQueue = [];
   let translatePumpRunning = false;
+  const status = createStatusLine();
 
   function printLine(line) {
+    status.stop();
     readline.clearLine(process.stdout, 0);
     readline.cursorTo(process.stdout, 0);
     process.stdout.write(line + '\n');
@@ -255,14 +266,9 @@ async function main() {
   }
 
   function notify(message) {
-    const line = `[rcli-translate] ${message}`;
+    const line = paint(c.dim, '· ') + paint(c.teal, 'rcli') + paint(c.dim, `: ${message}`);
     if (answering || translating) deferredLines.push(line);
     else printLine(line);
-  }
-
-  function fitOneRow(text) {
-    const width = (process.stdout.columns || 80) - 1;
-    return text.length <= width ? text : '…' + text.slice(-(width - 1));
   }
 
   function ensureSessionState() {
@@ -299,6 +305,7 @@ async function main() {
       sttStreams.meeting.reset();
     }
     recording = true;
+    status.set('listen', `→ ${opts.to}`);
     notify(
       `live translate ON (${reason}; window: "${appName}"; → ${opts.to}). Session: ${sessionDir}`
     );
@@ -316,6 +323,7 @@ async function main() {
       }
       partials.meeting = '';
       utteranceStart.meeting = null;
+      status.set('pause', 'ask a question anytime');
       notify(
         opts.mic
           ? 'translate paused — ask typed/spoken questions about the transcript, or "start" again.'
@@ -429,6 +437,7 @@ async function main() {
     if (!tts || !text) return;
     lastSpokenText = text;
     speaking = true;
+    status.set('speak', text.slice(0, 48) + (text.length > 48 ? '…' : ''));
     resetSttBuffers();
     try {
       await tts.speak(text);
@@ -437,7 +446,9 @@ async function main() {
     } finally {
       speaking = false;
       resetSttBuffers();
-      muteUntil = Date.now() + 2200;
+      muteUntil = Date.now() + 1800;
+      if (recording) status.set('listen', `→ ${opts.to}`);
+      else status.stop();
     }
   }
 
@@ -447,6 +458,7 @@ async function main() {
       return;
     }
     answering = true;
+    status.set('think', question.slice(0, 40) + (question.length > 40 ? '…' : ''));
     try {
       const recentLines = transcript ? transcript.lastMinutes(opts.minutes).map((s) => s.line) : [];
       const inWindow = new Set(recentLines);
@@ -524,12 +536,15 @@ async function main() {
     } finally {
       translating = false;
       translatePumpRunning = false;
+      if (recording && !speaking && !answering) status.set('listen', `→ ${opts.to}`);
       while (deferredLines.length) process.stdout.write(deferredLines.shift() + '\n');
       rl.prompt(true);
     }
   }
 
   function enqueueMeetingTranslate({ text, lang, startedAt }) {
+    const t0 = Date.now();
+    status.set('translate', lang && lang !== 'und' ? `${lang} → ${opts.to}` : `→ ${opts.to}`);
     translateQueue.push(async () => {
       ensureSessionState();
       const recentContext = transcript
@@ -559,8 +574,14 @@ async function main() {
       retrieval.add(seg);
       summarizer.addSegment(seg);
       summarizer.maybeUpdate();
-      if (answering) deferredLines.push(seg.line);
-      else printLine(seg.line);
+      const elapsed = Date.now() - t0;
+      const pretty = formatFinalLine({
+        line: seg.line,
+        ms: elapsed,
+        spoken: !!(tts && meta.translation),
+      });
+      if (answering) deferredLines.push(pretty);
+      else printLine(pretty);
       await speakAnswer(meta.translation);
     });
     void pumpTranslateQueue();
@@ -580,12 +601,18 @@ async function main() {
       }
       partials[source] = text;
       if (answering || translating) return;
+      status.stop();
       readline.clearLine(process.stdout, 0);
       readline.cursorTo(process.stdout, 0);
       let tag = opts.sourceLabels[source] || source;
       if (source === 'meeting' && lang && lang !== 'und') tag = `${tag}/${lang}`;
       if (!recording && source === 'you') tag = `${opts.sourceLabels.you} → chat`;
-      process.stdout.write(fitOneRow(`… [${tag}] ${text}`));
+      const row = formatPartialLine({
+        tag,
+        text,
+        mode: source === 'you' ? 'you' : 'hear',
+      });
+      process.stdout.write(fitOneRow(row));
     });
 
     sttStream.on('final', (payload) => {
@@ -621,8 +648,9 @@ async function main() {
         retrieval.add(seg);
         summarizer.addSegment(seg);
         summarizer.maybeUpdate();
-        if (answering || translating) deferredLines.push(seg.line);
-        else printLine(seg.line);
+        const pretty = formatFinalLine({ line: seg.line, spoken: false });
+        if (answering || translating) deferredLines.push(pretty);
+        else printLine(pretty);
         return;
       }
 
@@ -687,8 +715,9 @@ async function main() {
   async function shutdown() {
     if (shuttingDown) return;
     shuttingDown = true;
+    status.stop();
     while (deferredLines.length) process.stdout.write(deferredLines.shift() + '\n');
-    process.stdout.write('\n[rcli-translate] shutting down...\n');
+    process.stdout.write('\n' + paint(c.dim, 'rcli-translate · bye') + '\n');
     for (const source of Object.keys(captures)) captures[source].stop();
     for (const source of Object.keys(sttStreams)) sttStreams[source].close();
     stt.close();
@@ -702,15 +731,18 @@ async function main() {
   rl.on('SIGINT', () => void shutdown());
   process.on('SIGINT', () => void shutdown());
 
+  process.stdout.write(
+    banner({ to: opts.to, other: opts.sourceLabels.meeting, tts: opts.tts })
+  );
   console.log(
-    `[rcli-translate] ready (target: ${opts.to}, window: ${opts.minutes} min, context: ${CONTEXT_TOKEN_BUDGET} tokens).`
+    paint(c.dim, `  window ${opts.minutes}m · context ${CONTEXT_TOKEN_BUDGET} tok · STT ${STT_ENGINE}`)
   );
   if (opts.autostart) {
     beginSession('autostart');
   } else {
-    console.log('[rcli-translate] Type or say "start" to begin live translation. /quit to exit.\n');
+    notify('Type or say "start" to begin live translation.');
   }
-  console.log('[rcli-translate] Type "stop" to pause and ask questions. /quit to exit.\n');
+  notify('Type "stop" to pause and ask questions. /quit to exit.');
   rl.prompt();
 }
 

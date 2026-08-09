@@ -321,12 +321,30 @@ test('transcript stores bilingual translation meta on meeting lines', async () =
 });
 
 test('parseTranslateJson extracts lang/repaired/translation', () => {
-  const { parseTranslateJson, buildTranslatePrompt } = require('../src/translate');
+  const { parseTranslateJson, buildTranslatePrompt, isAlreadyTargetLang, lightRepair, translateUtterance } =
+    require('../src/translate');
   const parsed = parseTranslateJson('Here you go:\n{"lang":"hi","repaired":"ठीक है","translation":"Okay"}\n');
   assert.deepStrictEqual(parsed, { lang: 'hi', repaired: 'ठीक है', translation: 'Okay' });
   const prompt = buildTranslatePrompt({ text: 'hola', to: 'en', srcLangHint: 'es' });
   assert.match(prompt, /Target language code: en/);
   assert.match(prompt, /"hola"/);
+  assert.ok(isAlreadyTargetLang('en', 'en'));
+  assert.ok(!isAlreadyTargetLang('hi', 'en'));
+  assert.strictEqual(lightRepair('  hello   world ! '), 'hello world!');
+});
+
+test('ui helpers format partial/final and banner', () => {
+  const { formatPartialLine, formatFinalLine, banner, fitOneRow, createStatusLine } = require('../src/ui');
+  const partial = formatPartialLine({ tag: 'other/hi', text: 'namaste', mode: 'hear' });
+  assert.match(partial.replace(/\x1b\[[0-9;]*m/g, ''), /\[other\/hi\] namaste/);
+  const fin = formatFinalLine({ line: '[00:00:01] [other/hi→en] Hello', ms: 1234, spoken: true });
+  assert.match(fin.replace(/\x1b\[[0-9;]*m/g, ''), /1\.2s/);
+  assert.match(fin.replace(/\x1b\[[0-9;]*m/g, ''), /spoken/);
+  assert.match(banner({ to: 'en', other: 'aditya' }).replace(/\x1b\[[0-9;]*m/g, ''), /rcli-translate/);
+  assert.ok(fitOneRow('hi', 80).includes('hi'));
+  const status = createStatusLine({ write: () => {}, columns: () => 80 });
+  status.set('listen', '→ en');
+  status.stop();
 });
 
 test('transcript.add rejects an unknown source', () => {

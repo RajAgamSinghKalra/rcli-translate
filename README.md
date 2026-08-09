@@ -10,7 +10,9 @@ Forked from [rcli-meet](https://github.com/RajAgamSinghKalra/rcli-meet). Everyth
 2. **Your mic** — captioned into the session (and spoken commands); not live-translated in v1.
 3. **After / during pause (`stop`)** — type or speak questions about what was said; answers use the translated transcript + rolling summary.
 
-Typical delay after they finish a sentence: **~1–3 seconds** (VAD silence gap + Whisper final + LLM).
+Typical delay after they finish a sentence: **~0.7–2 seconds** when already in your language (fast path), or **~1–3 seconds** when translating (VAD + Whisper + LLM).
+
+Live UI shows a spinner for listening / translating / speaking, colored partials, and timing on each final line.
 
 ## Requirements
 

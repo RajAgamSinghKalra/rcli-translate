@@ -26,10 +26,10 @@ const INITIAL_PROMPT =
       'Short English commands: start, save, load, record, begin, stop.'
   );
 
-// Live partial cadence -- user said 2–3s delay is fine.
-const PARTIAL_EVERY_MS = Number(env('PARTIAL_MS', '1600')) || 1600;
-const MIN_PARTIAL_AUDIO_MS = Number(env('MIN_PARTIAL_MS', '700')) || 700;
-const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '900')) || 900;
+// Live partial cadence — snappy defaults (override with RCLI_XL8_PARTIAL_MS etc).
+const PARTIAL_EVERY_MS = Number(env('PARTIAL_MS', '900')) || 900;
+const MIN_PARTIAL_AUDIO_MS = Number(env('MIN_PARTIAL_MS', '450')) || 450;
+const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '650')) || 650;
 const MAX_UTTERANCE_MS = Number(env('VAD_MAX_MS', '25000')) || 25000;
 const ENERGY_GATE = Number(env('VAD_THRESHOLD', String(ENERGY_THRESHOLD))) || ENERGY_THRESHOLD;
 

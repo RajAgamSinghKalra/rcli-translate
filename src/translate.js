@@ -3,8 +3,27 @@
 const { serialize, NO_THINK_DIRECTIVE, TRANSCRIPTION_CAVEAT } = require('./llm');
 
 const TRANSLATE_MAX_TOKENS =
-  Number(process.env.RCLI_XL8_TRANSLATE_TOKENS || process.env.RCLI_MEET_TRANSLATE_TOKENS) || 220;
-const TRANSLATE_TEMPERATURE = 0.2;
+  Number(process.env.RCLI_XL8_TRANSLATE_TOKENS || process.env.RCLI_MEET_TRANSLATE_TOKENS) || 140;
+const TRANSLATE_TEMPERATURE = 0.15;
+const ALWAYS_LLM = /^(1|on|true|yes)$/i.test(process.env.RCLI_XL8_ALWAYS_LLM || '');
+
+/** True when Whisper already labeled this as the target language. */
+function isAlreadyTargetLang(srcLangHint, to) {
+  const a = String(srcLangHint || '').toLowerCase();
+  const b = String(to || '').toLowerCase();
+  if (!a || a === 'und' || !b) return false;
+  return a === b || (a.startsWith(b) || b.startsWith(a));
+}
+
+/**
+ * Lightweight cleanup without a full translate when source ≈ target.
+ */
+function lightRepair(text) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.!?])/g, '$1')
+    .trim();
+}
 
 /**
  * @param {{text: string, to?: string, srcLangHint?: string, recentContext?: string, disableThinking?: boolean}} opts
@@ -74,7 +93,19 @@ async function translateUtterance(llm, opts) {
   const text = String(opts.text || '').trim();
   const to = (opts.to || 'en').toLowerCase();
   if (!text) {
-    return { lang: opts.srcLangHint || 'und', repaired: '', translation: '', raw: '' };
+    return { lang: opts.srcLangHint || 'und', repaired: '', translation: '', raw: '', fast: true };
+  }
+
+  // Snappy path: already in target language → skip LLM (override with RCLI_XL8_ALWAYS_LLM=1).
+  if (!ALWAYS_LLM && isAlreadyTargetLang(opts.srcLangHint, to)) {
+    const cleaned = lightRepair(text);
+    return {
+      lang: opts.srcLangHint || to,
+      repaired: cleaned,
+      translation: cleaned,
+      raw: '',
+      fast: true,
+    };
   }
 
   const prompt = buildTranslatePrompt({
@@ -100,6 +131,7 @@ async function translateUtterance(llm, opts) {
         repaired: parsed.repaired || text,
         translation: parsed.translation || parsed.repaired || text,
         raw,
+        fast: false,
       };
     }
     // Fallback: treat ASR as already-target-language if JSON parse fails.
@@ -108,6 +140,7 @@ async function translateUtterance(llm, opts) {
       repaired: text,
       translation: text,
       raw,
+      fast: false,
     };
   });
 }
@@ -116,5 +149,7 @@ module.exports = {
   buildTranslatePrompt,
   parseTranslateJson,
   translateUtterance,
+  isAlreadyTargetLang,
+  lightRepair,
   TRANSLATE_MAX_TOKENS,
 };
