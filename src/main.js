@@ -391,6 +391,7 @@ async function main() {
   let recording = false; // live-translate / capture active
   let translateEpoch = 0; // bump on stop to abandon queued jobs
   let speakEpoch = 0; // bump to cancel/supersede TTS
+  let lastMeetingAsrAt = 0;
   let sessionDir = null;
   let transcript = null;
   let retrieval = null;
@@ -404,6 +405,15 @@ async function main() {
   const translateQueue = [];
   let translatePumpRunning = false;
   const status = createStatusLine();
+  const heartbeat = setInterval(() => {
+    if (!recording || answering || translating || speaking) return;
+    if (!process.stdout.isTTY) return;
+    const ago = lastMeetingAsrAt
+      ? `${Math.max(0, Math.round((Date.now() - lastMeetingAsrAt) / 1000))}s ago`
+      : 'waiting for speech';
+    status.set('listen', `→ ${opts.to} · last ${ago}`);
+  }, 2000);
+  if (heartbeat.unref) heartbeat.unref();
 
   function printLine(line) {
     status.stop();
@@ -648,7 +658,8 @@ async function main() {
   function enqueueSpeak(text) {
     speakEpoch += 1;
     const epoch = speakEpoch;
-    if (tts && typeof tts.stop === 'function') tts.stop();
+    // Only interrupt if something is currently playing — don't kill the warm server every line.
+    if (speaking && tts && typeof tts.stop === 'function') tts.stop();
     void speakAnswer(text, { epoch }).catch((err) => {
       log.error('TTS failed', err.message);
     });
@@ -940,6 +951,7 @@ async function main() {
       }
 
       if (recording && source === 'meeting') {
+        lastMeetingAsrAt = Date.now();
         enqueueMeetingTranslate({ text, lang, startedAt });
         return;
       }
@@ -1029,7 +1041,11 @@ async function main() {
   async function shutdown() {
     if (shuttingDown) return;
     shuttingDown = true;
+    clearInterval(heartbeat);
     status.stop();
+    speakEpoch += 1;
+    translateEpoch += 1;
+    translateQueue.length = 0;
     while (deferredLines.length) process.stdout.write(deferredLines.shift() + '\n');
     process.stdout.write('\n' + paint(c.dim, 'rcli-translate · bye') + '\n');
     log.info('shutting down');

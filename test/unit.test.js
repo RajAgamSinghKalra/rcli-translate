@@ -970,6 +970,7 @@ test('scrubHallucination drops common Whisper silence hallucinations', () => {
   assert.strictEqual(scrubHallucination('Thanks for watching.'), '');
   assert.strictEqual(scrubHallucination('Clear conversation.'), '');
   assert.strictEqual(scrubHallucination('uh'), '');
+  assert.strictEqual(scrubHallucination('like and subscribe'), '');
   assert.strictEqual(
     scrubHallucination(
       'You are the son of a bitch. You are the son of a bitch. You are the son of a bitch.'

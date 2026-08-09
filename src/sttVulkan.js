@@ -152,7 +152,7 @@ function createDecodeScheduler(decodeFn) {
         // Cap backlog: keep newest high-priority + one other.
         while (finalQueue.length > 3) {
           const dropped = finalQueue.shift();
-          dropped.resolve({ lang: 'und', text: '', rawText: '' });
+          dropped.resolve({ lang: 'und', text: '', rawText: '', dropped: true });
         }
         void pump();
       });
@@ -168,20 +168,26 @@ function scrubHallucination(text) {
   const junk = [
     /^thanks? for watching\.?$/i,
     /^thank you\.?$/i,
+    /^thanks?\.?$/i,
     /^please subscribe\.?$/i,
     /^subscribe to .+ channel\.?$/i,
+    /^like and subscribe\.?$/i,
     /^clear conversation\.?$/i,
     /^indian english meeting\.?$/i,
     /^transcribe the spoken english accurately\.?$/i,
     /^speakers use indian english accents?\.?$/i,
+    /^live multilingual meeting.*$/i,
+    /^casual discord\/meet chat.*$/i,
     /^you$/,
     /^\.+$/,
     /^\[.*\]$/,
     /^\(.*\)$/,
+    /^♪+$/,
+    /^music$/i,
   ];
   if (junk.some((re) => re.test(t))) return '';
   if (t.length < 2) return '';
-  if (/^(uh+|um+|ah+|hmm+)$/i.test(lower)) return '';
+  if (/^(uh+|um+|ah+|hmm+|mm+)$/i.test(lower)) return '';
 
   // Collapse obvious phrase loops: "foo. foo. foo." → "foo."
   t = t.replace(/(.{8,80}?)(?:\s*\1){2,}/gi, '$1');
@@ -193,6 +199,8 @@ function scrubHallucination(text) {
     const repeats = joined.split(chunk).length - 1;
     if (chunk.length > 8 && repeats >= 3) return '';
   }
+  // Tiny all-punctuation / emoji only
+  if (!/[\p{L}\p{N}]/u.test(t)) return '';
   return t.trim();
 }
 
@@ -395,6 +403,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
     let decodeGen = 0; // ignore stale async results after reset
     // Soft hint only — never force sticky lang when user asked for auto (mid-call switches).
     let lastHeardLang = streamLanguage !== 'auto' ? streamLanguage : '';
+    let noiseFloor = ENERGY_GATE * 0.4;
 
     function resetUtterance() {
       chunks.length = 0;
@@ -417,8 +426,6 @@ function createSTTEngine(modelPath = MODEL_PATH) {
     }
 
     function decodeLanguage() {
-      // Always honor explicit --from; for auto always send auto so mid-call
-      // switches work (sticky was forcing wrong-language decode).
       if (streamLanguage && streamLanguage !== 'auto') return streamLanguage;
       return 'auto';
     }
@@ -440,6 +447,10 @@ function createSTTEngine(modelPath = MODEL_PATH) {
       chunks.length = 0;
       chunks.push(Float32Array.from(tail));
       bufferedMs = OVERLAP_MS;
+    }
+
+    function adaptiveGate() {
+      return Math.max(ENERGY_GATE, Math.min(0.04, noiseFloor * 3.2));
     }
 
     function requestPartial() {
@@ -518,7 +529,12 @@ function createSTTEngine(modelPath = MODEL_PATH) {
     emitter.feed = function feed(samples) {
       if (streamClosed || engineClosed) return;
       const durMs = (samples.length / SAMPLE_RATE) * 1000;
-      const loud = rms(samples) > ENERGY_GATE;
+      const level = rms(samples);
+      if (!speaking) {
+        // Track ambient noise so Discord compressor beds don't open utterances.
+        noiseFloor = noiseFloor * 0.97 + level * 0.03;
+      }
+      const loud = level > adaptiveGate();
 
       if (loud) {
         chunks.push(samples);
