@@ -268,19 +268,21 @@ function createSTTEngine(modelPath = MODEL_PATH) {
    */
   function parseWorkerPayload(raw) {
     const s = String(raw || '').trim();
-    if (!s) return { lang: 'und', text: '' };
+    if (!s) return { lang: 'und', text: '', rawText: '' };
     if (s.startsWith('{')) {
       try {
         const obj = JSON.parse(s);
+        const rawText = String(obj.text || '');
         return {
           lang: String(obj.lang || 'und').toLowerCase(),
-          text: scrubHallucination(obj.text || ''),
+          text: scrubHallucination(rawText),
+          rawText,
         };
       } catch {
         /* fall through */
       }
     }
-    return { lang: 'und', text: scrubHallucination(s) };
+    return { lang: 'und', text: scrubHallucination(s), rawText: s };
   }
 
   function transcribe(samples, prompt, mode, language) {
@@ -410,11 +412,16 @@ function createSTTEngine(modelPath = MODEL_PATH) {
           lastPartialText = '';
           const t = (result && result.text) || '';
           const lang = (result && result.lang) || 'und';
-          // Always emit final (even empty) so the app can log misses.
+          const rawText = (result && result.rawText) || t;
           if (t) {
             committedPrompt = `${committedPrompt} ${t}`.trim().slice(-500);
           }
-          emitter.emit('final', { text: t, lang, msAudio: Math.round((samples.length / SAMPLE_RATE) * 1000) });
+          emitter.emit('final', {
+            text: t,
+            lang,
+            rawText,
+            msAudio: Math.round((samples.length / SAMPLE_RATE) * 1000),
+          });
         })
         .catch((err) => {
           if (!streamClosed && !engineClosed) emitter.emit('error', err);

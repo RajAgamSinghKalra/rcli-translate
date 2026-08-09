@@ -76,6 +76,7 @@ Usage: node src/main.js [options]
 Options:
   --to <lang>          Target language code for translations (default: en)
                        Common: en, hi, es, fr, de, pt, ja, ko, zh, ar, ta, te
+  --from <lang>        Language THEY speak (default: en; use auto to detect)
   --pick-to            Interactive menu to choose --to at startup
   --minutes <n>        Recency window for Q&A (default: 20)
   --llm <id|path>      RunAnywhere LLM catalog id or local GGUF path
@@ -122,6 +123,7 @@ function parseArgs(argv) {
     micGain: Number(env('MIC_GAIN', '1')) || 1,
     other: env('OTHER', 'transcribing'),
     to: (env('TO', 'en') || 'en').toLowerCase(),
+    from: (env('FROM', 'en') || 'en').toLowerCase(), // meeting STT language; "auto" allowed
     autostart: true,
     muteOriginal: /^(1|on|true|yes)$/i.test(env('MUTE_ORIGINAL', '')),
     loopbackDevice: env('LOOPBACK', ''),
@@ -157,6 +159,7 @@ function parseArgs(argv) {
       opts.micGain = gain;
     } else if (arg === '--other') opts.other = takeValue(arg, i++);
     else if (arg === '--to') opts.to = takeValue(arg, i++).toLowerCase();
+    else if (arg === '--from') opts.from = takeValue(arg, i++).toLowerCase();
     else if (arg === '--no-tts') opts.tts = false;
     else if (arg === '--no-autostart') opts.autostart = false;
     else if (arg === '--mute-original') opts.muteOriginal = true;
@@ -252,9 +255,14 @@ function chunkText(text, maxChars = FILE_CHUNK_CHARS) {
 
 function normalizeFinalPayload(payload) {
   if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
-    return { text: String(payload.text || '').trim(), lang: String(payload.lang || 'und').toLowerCase() };
+    return {
+      text: String(payload.text || '').trim(),
+      lang: String(payload.lang || 'und').toLowerCase(),
+      rawText: String(payload.rawText || payload.text || '').trim(),
+      msAudio: payload.msAudio,
+    };
   }
-  return { text: String(payload || '').trim(), lang: 'und' };
+  return { text: String(payload || '').trim(), lang: 'und', rawText: String(payload || '').trim() };
 }
 
 async function main() {
@@ -272,6 +280,7 @@ async function main() {
   log.info('argv', process.argv.slice(2));
   log.info('opts', {
     to: opts.to,
+    from: opts.from,
     other: opts.other,
     speakers: opts.speakersDevice,
     loopback: opts.loopbackDevice,
@@ -785,12 +794,20 @@ async function main() {
     });
 
     sttStream.on('final', (payload) => {
-      const { text, lang } = normalizeFinalPayload(payload);
-      const msAudio = payload && payload.msAudio;
+      const { text, lang, rawText, msAudio } = normalizeFinalPayload(payload);
       const startedAt = utteranceStart[source] ?? (transcript ? transcript.elapsedNow() : Date.now());
       utteranceStart[source] = null;
       partials[source] = '';
-      log.event('asr.final.raw', { source, lang, text, msAudio, muted: isAudioMuted(source), recording });
+      log.event('asr.final.raw', {
+        source,
+        lang,
+        text,
+        rawText,
+        scrubbed: !!(rawText && !text),
+        msAudio,
+        muted: isAudioMuted(source),
+        recording,
+      });
       if (isAudioMuted(source)) return;
       if (!recording && source === 'meeting') return;
       if (source === 'meeting' && text && isEchoOfLastSpoken(text)) {
@@ -799,7 +816,11 @@ async function main() {
       }
       if (!text) {
         if (source === 'meeting' && recording) {
-          log.warn('empty ASR final for meeting — no translate');
+          log.warn('empty ASR final for meeting — no translate', { rawText, lang, msAudio });
+          // Visible heartbeat so the terminal isn't "doing nothing".
+          printLine(
+            paint(c.dim, `· no speech text (${((msAudio || 0) / 1000).toFixed(1)}s, lang=${lang || '?'})`)
+          );
           status.set('listen', `→ ${opts.to}`);
         }
         return;
@@ -842,7 +863,13 @@ async function main() {
     if (source === 'you' && !opts.mic) continue;
     const streamOpts =
       source === 'meeting'
-        ? { language: 'auto', prompt: 'Live multilingual meeting speech. Transcribe in the spoken language.' }
+        ? {
+            language: opts.from || 'en',
+            prompt:
+              opts.from && opts.from !== 'auto'
+                ? `Meeting speech in ${opts.from}. Transcribe accurately.`
+                : 'Live multilingual meeting speech. Transcribe in the spoken language.',
+          }
         : { language: 'en', prompt: MIC_PROMPT };
     const sttStream = stt.createStream(streamOpts);
     wireStream(sttStream, source);

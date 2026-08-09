@@ -198,65 +198,79 @@ def _write_text(stream, text: str) -> None:
 
 def _transcribe(lib, ctx, samples, n_samples, lang_bytes, prompt_bytes, mode, n_threads):
     strategy = WHISPER_SAMPLING_BEAM_SEARCH if mode == 1 else WHISPER_SAMPLING_GREEDY
-    params_ptr = lib.whisper_full_default_params_by_ref(strategy)
-    params = params_ptr.contents
-    params.n_threads = n_threads
-    params.translate = False
-    params.no_context = True
-    params.no_timestamps = True
-    # Partials: force one segment for snappy growing text.
-    # Finals: allow natural segments for longer utterances.
-    params.single_segment = mode == 0
-    params.print_special = False
-    params.print_progress = False
-    params.print_realtime = False
-    params.print_timestamps = False
-    lang_str = (lang_bytes or b"en").decode("utf-8", errors="replace").strip().lower() or "en"
-    auto = lang_str in ("auto", "detect", "")
-    # NULL language + detect_language is the reliable auto path on whisper.cpp.
-    # Passing the literal "auto" string can yield empty transcripts on some builds.
-    if auto:
-        params.language = None
-        params.detect_language = True
-    else:
-        params.language = lang_str.encode("utf-8")
+
+    def run_once(lang_str: str, use_prompt: bool):
+        params_ptr = lib.whisper_full_default_params_by_ref(strategy)
+        params = params_ptr.contents
+        params.n_threads = n_threads
+        params.translate = False
+        params.no_context = True
+        params.no_timestamps = True
+        params.single_segment = mode == 0
+        params.print_special = False
+        params.print_progress = False
+        params.print_realtime = False
+        params.print_timestamps = False
+        # IMPORTANT: do NOT set detect_language=True — that path often returns
+        # lang id with ZERO transcript segments on whisper.cpp Vulkan builds.
+        # Use language="auto" (or a fixed code) with detect_language=False.
+        auto = lang_str in ("auto", "detect", "")
+        params.language = b"auto" if auto else lang_str.encode("utf-8")
         params.detect_language = False
-    params.initial_prompt = prompt_bytes if prompt_bytes else None
-    params.carry_initial_prompt = bool(prompt_bytes)
-    params.temperature = 0.0
-    params.temperature_inc = 0.0  # don't climb -- better for accented speech
-    params.suppress_blank = True
-    params.suppress_nst = True
-    # Partials were too strict and often returned empty → UI stuck on "…".
-    params.no_speech_thold = 0.6 if mode == 0 else 0.5
-    if mode == 1:
-        params.beam_search.beam_size = 5
-        params.beam_search.patience = 1.0
-    else:
-        params.greedy.best_of = 1
+        if use_prompt and prompt_bytes:
+            params.initial_prompt = prompt_bytes
+            params.carry_initial_prompt = True
+        else:
+            params.initial_prompt = None
+            params.carry_initial_prompt = False
+        params.temperature = 0.0
+        params.temperature_inc = 0.2
+        params.suppress_blank = True
+        params.suppress_nst = True
+        params.no_speech_thold = 0.4
+        if mode == 1:
+            params.beam_search.beam_size = 5
+            params.beam_search.patience = 1.0
+        else:
+            params.greedy.best_of = 1
 
-    rc = lib.whisper_full(ctx, params, samples, n_samples)
-    lib.whisper_free_params(params_ptr)
-    if rc != 0:
-        return {"lang": "und", "text": ""}
+        rc = lib.whisper_full(ctx, params, samples, n_samples)
+        lib.whisper_free_params(params_ptr)
+        if rc != 0:
+            return "und", ""
 
-    detected = lang_str if not auto else "und"
-    try:
-        lang_id = lib.whisper_full_lang_id(ctx)
-        if lang_id >= 0:
-            name = lib.whisper_lang_str(lang_id)
-            if name:
-                detected = name.decode("utf-8", errors="replace")
-    except Exception:
-        pass
+        detected = lang_str if not auto else "und"
+        try:
+            lang_id = lib.whisper_full_lang_id(ctx)
+            if lang_id >= 0:
+                name = lib.whisper_lang_str(lang_id)
+                if name:
+                    detected = name.decode("utf-8", errors="replace")
+        except Exception:
+            pass
 
-    parts = []
-    n_seg = lib.whisper_full_n_segments(ctx)
-    for i in range(n_seg):
-        t = lib.whisper_full_get_segment_text(ctx, i)
-        if t:
-            parts.append(t.decode("utf-8", errors="replace"))
-    return {"lang": detected or "und", "text": "".join(parts).strip()}
+        parts = []
+        n_seg = lib.whisper_full_n_segments(ctx)
+        for i in range(n_seg):
+            t = lib.whisper_full_get_segment_text(ctx, i)
+            if t:
+                parts.append(t.decode("utf-8", errors="replace"))
+        return detected or "und", "".join(parts).strip()
+
+    lang_str = (lang_bytes or b"en").decode("utf-8", errors="replace").strip().lower() or "en"
+    detected, text = run_once(lang_str, use_prompt=True)
+
+    # Retry once if auto/fixed decode returned nothing — common with bad auto
+    # settings or an English prompt biasing an empty decode.
+    if not text and n_samples >= SAMPLE_RATE:
+        for fallback in ("en", "auto"):
+            if fallback == lang_str:
+                continue
+            detected2, text2 = run_once(fallback, use_prompt=False)
+            if text2:
+                return {"lang": detected2 or detected, "text": text2}
+
+    return {"lang": detected, "text": text}
 
 
 def main() -> int:
