@@ -35,6 +35,7 @@ function createSummarizer({ llm, disableThinking = false, onError = () => {}, la
   let summary = '';
   let pending = [];
   let running = false;
+  let paused = false;
   const sourceLabels = {
     meeting: (labels && labels.meeting) || 'meeting',
     you: (labels && labels.you) || 'you',
@@ -62,8 +63,10 @@ function createSummarizer({ llm, disableThinking = false, onError = () => {}, la
      * after every finalized segment -- actually running through `serialize`
      * means it naturally queues behind (or ahead of) any in-flight question
      * rather than racing the same LLM context.
+     * @param {{force?: boolean}} [opts] force=true runs even when paused
      */
-    maybeUpdate() {
+    maybeUpdate(opts = {}) {
+      if (paused && !opts.force) return;
       if (running || pending.length < SEGMENTS_PER_UPDATE) return;
       running = true;
       const batch = pending;
@@ -83,13 +86,16 @@ function createSummarizer({ llm, disableThinking = false, onError = () => {}, la
       })
         .catch((err) => {
           onError(`meeting summary update failed: ${err.message}`);
-          // Put the batch back so this content isn't silently lost from the
-          // summary forever if it was a transient failure.
           pending = batch.concat(pending);
         })
         .finally(() => {
           running = false;
         });
+    },
+
+    /** Pause auto-updates while live translate needs the LLM. */
+    setPaused(value) {
+      paused = !!value;
     },
   };
 }

@@ -41,6 +41,9 @@ from ctypes import (
 SAMPLE_RATE = 16000
 WHISPER_SAMPLING_GREEDY = 0
 WHISPER_SAMPLING_BEAM_SEARCH = 1
+# Live default: best_of=1 (fast). Set RCLI_XL8_WHISPER_BEST_OF=3 for accents.
+BEST_OF_FINAL = max(1, int(os.environ.get("RCLI_XL8_WHISPER_BEST_OF", "1") or "1"))
+RETRY_MIN_RMS = float(os.environ.get("RCLI_XL8_WHISPER_RETRY_RMS", "0.012") or "0.012")
 
 
 class WhisperAheads(ctypes.Structure):
@@ -230,11 +233,10 @@ def _transcribe(lib, ctx, samples, n_samples, lang_bytes, prompt_bytes, mode, n_
         params.suppress_blank = True
         params.suppress_nst = True
         # Slightly lower so quiet / accented speech is less often dropped as "no speech".
-        params.no_speech_thold = 0.5
+        params.no_speech_thold = 0.55
         params.entropy_thold = 2.8
         params.logprob_thold = -1.0
-        # Finals: best_of=3 helps accents without beam-search latency.
-        params.greedy.best_of = 3 if mode == 1 else 1
+        params.greedy.best_of = BEST_OF_FINAL if mode == 1 else 1
 
         rc = lib.whisper_full(ctx, params, samples, n_samples)
         lib.whisper_free_params(params_ptr)
@@ -259,24 +261,30 @@ def _transcribe(lib, ctx, samples, n_samples, lang_bytes, prompt_bytes, mode, n_
                 parts.append(t.decode("utf-8", errors="replace"))
         return detected or "und", "".join(parts).strip()
 
+    # RMS gate — don't burn a second GPU decode on near-silence / Discord beds.
+    energy = 0.0
+    for i in range(n_samples):
+        v = samples[i]
+        energy += v * v
+    rms = (energy / max(1, n_samples)) ** 0.5
+
     lang_str = (lang_bytes or b"auto").decode("utf-8", errors="replace").strip().lower() or "auto"
     # Auto mode: skip initial_prompt on the first pass — English prompts can
     # bias multilingual decode toward empty / wrong language.
     use_prompt_first = lang_str not in ("auto", "detect", "")
     detected, text = run_once(lang_str, use_prompt=use_prompt_first)
 
-    # Retry if empty — prefer another auto pass before forcing English.
-    if not text and n_samples >= SAMPLE_RATE:
+    # Retry if empty — only when audio is loud enough to be real speech.
+    if not text and n_samples >= SAMPLE_RATE and rms >= RETRY_MIN_RMS:
         retries = []
         if lang_str in ("auto", "detect", ""):
-            retries = [("auto", False), ("en", False)]
+            retries = [("auto", False)]
         else:
             retries = [("auto", False)]
-            if lang_str not in ("en", "auto"):
-                retries.insert(0, (lang_str, False))
-            # Only force English when the caller asked for English.
             if lang_str == "en":
                 retries.append(("en", False))
+            elif lang_str not in ("en", "auto"):
+                retries.insert(0, (lang_str, False))
         seen = {(lang_str, use_prompt_first)}
         for fb_lang, fb_prompt in retries:
             key = (fb_lang, fb_prompt)

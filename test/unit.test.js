@@ -326,7 +326,8 @@ test('parseTranslateJson extracts lang/repaired/translation', () => {
   const parsed = parseTranslateJson('Here you go:\n{"lang":"hi","repaired":"ठीक है","translation":"Okay"}\n');
   assert.deepStrictEqual(parsed, { lang: 'hi', repaired: 'ठीक है', translation: 'Okay' });
   const prompt = buildTranslatePrompt({ text: 'hola', to: 'en', srcLangHint: 'es' });
-  assert.match(prompt, /Target code: en/);
+  assert.match(prompt, /\(en\)/);
+  assert.match(prompt, /JSON only/);
   const { looksLikeTargetLang } = require('../src/translate');
   assert.ok(looksLikeTargetLang('क्या हो रहा है?', 'hi'));
   assert.ok(!looksLikeTargetLang('What is going on?', 'hi'));

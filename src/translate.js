@@ -3,13 +3,13 @@
 const { serialize, NO_THINK_DIRECTIVE, TRANSCRIPTION_CAVEAT } = require('./llm');
 
 const TRANSLATE_MAX_TOKENS =
-  Number(process.env.RCLI_XL8_TRANSLATE_TOKENS || process.env.RCLI_MEET_TRANSLATE_TOKENS) || 180;
+  Number(process.env.RCLI_XL8_TRANSLATE_TOKENS || process.env.RCLI_MEET_TRANSLATE_TOKENS) || 140;
 const TRANSLATE_TEMPERATURE = 0.1;
 const ALWAYS_LLM = /^(1|on|true|yes)$/i.test(process.env.RCLI_XL8_ALWAYS_LLM || '');
 
 const LANG_NAMES = {
   en: 'English',
-  hi: 'Hindi (हिन्दी, Devanagari script)',
+  hi: 'Hindi (Devanagari हिन्दी)',
   es: 'Spanish',
   fr: 'French',
   de: 'German',
@@ -23,6 +23,11 @@ const LANG_NAMES = {
 };
 
 const SCRIPT_LANGS = new Set(['hi', 'zh', 'ja', 'ko', 'ar', 'ta', 'te']);
+const FEW_SHOT = {
+  hi: '{"lang":"en","repaired":"What\'s going on?","translation":"क्या हो रहा है?"}',
+  en: '{"lang":"hi","repaired":"क्या हो रहा है?","translation":"What\'s going on?"}',
+  es: '{"lang":"en","repaired":"What\'s going on?","translation":"¿Qué está pasando?"}',
+};
 
 /** True when Whisper already labeled this as the target language. */
 function isAlreadyTargetLang(srcLangHint, to) {
@@ -51,17 +56,17 @@ function looksLikeTargetLang(text, to) {
   if (code === 'ar') return /[\u0600-\u06ff]/.test(t);
   if (code === 'ta') return /[\u0b80-\u0bff]/.test(t);
   if (code === 'te') return /[\u0c00-\u0c7f]/.test(t);
-  // Latin targets: reject obvious wrong-script dumps.
   if (code === 'en') return !/[\u0900-\u097F\u4e00-\u9fff\u0600-\u06ff]/.test(t);
   return !/[\u0900-\u097F\u4e00-\u9fff\u0600-\u06ff\uac00-\ud7af]/.test(t);
 }
 
 function tokenBudgetFor(text, to) {
   const n = String(text || '').length;
-  const base = TRANSLATE_MAX_TOKENS;
-  // Devanagari / CJK JSON burns more tokens.
-  const mult = SCRIPT_LANGS.has(String(to || '').slice(0, 2)) ? 1.35 : 1;
-  return Math.min(320, Math.max(base, Math.ceil((n / 3) * mult) + 48));
+  const scripted = SCRIPT_LANGS.has(String(to || '').slice(0, 2));
+  // Short Discord lines should stay cheap; long lines get more room.
+  const floor = scripted ? 96 : 72;
+  const mult = scripted ? 1.25 : 1;
+  return Math.min(280, Math.max(floor, Math.ceil((n / 3.5) * mult) + 40));
 }
 
 /**
@@ -76,27 +81,19 @@ function buildTranslatePrompt({
   strict = false,
 }) {
   const targetName = LANG_NAMES[to] || to;
-  const hint = srcLangHint
-    ? `ASR language guess: "${srcLangHint}" (may be wrong — trust the words).`
-    : 'Detect the source language from the text.';
-  const ctx = recentContext ? `\nRecent context:\n${recentContext}\n` : '';
+  const hint = srcLangHint && srcLangHint !== 'und' ? `ASR lang guess: ${srcLangHint}.` : '';
+  const shot = FEW_SHOT[to] || FEW_SHOT.en;
+  const ctx = recentContext ? `Context: ${recentContext}\n` : '';
   const strictLine = strict
-    ? `\nCRITICAL RETRY: Your previous answer was NOT in ${targetName}. translation MUST use the correct script for "${to}". For Hindi use Devanagari only (example: "क्या हो रहा है?"). Never reply in English/Indonesian/romanization when to=hi.\n`
+    ? `RETRY: previous answer was NOT in ${targetName}. For hi use Devanagari only. Never English/Indonesian/romanization when to=hi.\n`
     : '';
 
-  return `Translate live meeting ASR into ${targetName}. Be fast and literal.
-
+  // Put /no_think first — Qwen3 follows it more reliably at the top.
+  return `${disableThinking ? `${NO_THINK_DIRECTIVE}\n` : ''}Translate meeting ASR into ${targetName} (${to}). Fast, literal.
 ${TRANSCRIPTION_CAVEAT}
-${hint}
-Source may change per utterance. Target code: ${to} = ${targetName}
-${strictLine}${ctx}
-ASR:
-"""${text}"""
-
-Return ONLY JSON:
-{"lang":"<source-iso>","repaired":"<cleaned SOURCE text>","translation":"<${to} text>"}
-If already ${to}, translation ≈ repaired. If noise: lang "und", empty strings.
-${disableThinking ? `\n${NO_THINK_DIRECTIVE}` : ''}`;
+${hint} ${strictLine}${ctx}Example: ${shot}
+ASR: """${text}"""
+JSON only: {"lang":"<src>","repaired":"<source>","translation":"<${to}>"}`;
 }
 
 function parseTranslateJson(raw, to = 'en') {
@@ -113,7 +110,6 @@ function parseTranslateJson(raw, to = 'en') {
     const translationField =
       obj.translation ||
       obj.translated ||
-      // Only accept legacy "en" key when target is English.
       (String(to).slice(0, 2) === 'en' ? obj.en : '') ||
       '';
     return {
@@ -155,7 +151,6 @@ async function translateUtterance(llm, opts) {
     };
   }
 
-  // Fast path only when Whisper AND script agree it's already the target language.
   if (!ALWAYS_LLM && isAlreadyTargetLang(opts.srcLangHint, to) && looksLikeTargetLang(text, to)) {
     const cleaned = lightRepair(text);
     return {
@@ -181,16 +176,19 @@ async function translateUtterance(llm, opts) {
     let raw = await runGenerate(llm, buildTranslatePrompt(baseOpts), budget);
     let parsed = parseTranslateJson(raw, to);
 
-    const needsRetry =
-      !parsed ||
-      !parsed.translation ||
-      (!isAlreadyTargetLang(parsed.lang, to) && !looksLikeTargetLang(parsed.translation, to));
-
-    if (needsRetry) {
+    // Retry only when we clearly got a wrong-script translation (or garbage JSON
+    // on a substantial utterance). Do NOT retry empty/noise — that doubles latency.
+    const wrongScript =
+      parsed &&
+      parsed.translation &&
+      !looksLikeTargetLang(parsed.translation, to) &&
+      !isAlreadyTargetLang(parsed.lang, to);
+    const garbageJson = !parsed && text.length >= 24;
+    if (wrongScript || garbageJson) {
       const retryRaw = await runGenerate(
         llm,
         buildTranslatePrompt({ ...baseOpts, strict: true, recentContext: '' }),
-        Math.min(320, budget + 64)
+        Math.min(280, budget + 48)
       );
       const retryParsed = parseTranslateJson(retryRaw, to);
       if (retryParsed && retryParsed.translation) {
@@ -207,7 +205,7 @@ async function translateUtterance(llm, opts) {
       return {
         lang: parsed.lang || opts.srcLangHint || 'und',
         repaired: parsed.repaired || text,
-        translation: targetOk ? translation : translation,
+        translation,
         raw,
         fast: false,
         targetOk,

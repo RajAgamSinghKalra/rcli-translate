@@ -29,13 +29,15 @@ const INITIAL_PROMPT =
 // Live partial cadence — meeting defaults skip partials (they steal GPU from finals).
 const PARTIAL_EVERY_MS = Number(env('PARTIAL_MS', '2000')) || 2000;
 const MIN_PARTIAL_AUDIO_MS = Number(env('MIN_PARTIAL_MS', '500')) || 500;
-const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '450')) || 450;
+const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '480')) || 480;
 // Short enough to stay live, long enough for accented phrases.
 const MAX_UTTERANCE_MS = Number(env('VAD_MAX_MS', '5500')) || 5500;
-const ENERGY_GATE = Number(env('VAD_THRESHOLD', '0.0045')) || 0.0045;
+const ENERGY_GATE = Number(env('VAD_THRESHOLD', '0.005')) || 0.005;
 const ENABLE_PARTIALS = !/^(0|off|false|no)$/i.test(String(env('PARTIALS', '0')));
 // When force-cutting a long utterance, keep this much tail for the next chunk.
 const OVERLAP_MS = Number(env('VAD_OVERLAP_MS', '400')) || 400;
+// Ignore Discord compressor blips shorter than this before opening an utterance.
+const MIN_SPEECH_MS = Number(env('VAD_MIN_SPEECH_MS', '280')) || 280;
 
 const MODEL_URL =
   'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin';
@@ -385,6 +387,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
     const chunks = [];
     let bufferedMs = 0;
     let silenceMs = 0;
+    let loudMs = 0;
     let speaking = false;
     let lastPartialAt = 0;
     let lastPartialText = '';
@@ -397,6 +400,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
       chunks.length = 0;
       bufferedMs = 0;
       silenceMs = 0;
+      loudMs = 0;
       speaking = false;
       lastPartialAt = 0;
       lastPartialText = '';
@@ -481,6 +485,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
       }
       silenceMs = 0;
       speaking = forceCut; // stay in speaking state across a hard cut
+      if (!forceCut) loudMs = 0;
       lastPartialAt = 0;
       lastPartialText = '';
 
@@ -516,16 +521,17 @@ function createSTTEngine(modelPath = MODEL_PATH) {
       const loud = rms(samples) > ENERGY_GATE;
 
       if (loud) {
+        chunks.push(samples);
+        bufferedMs += durMs;
+        loudMs += durMs;
+        silenceMs = 0;
+
         if (!speaking) {
+          if (loudMs < MIN_SPEECH_MS) return; // hold prebuffer; ignore compressor blips
           speaking = true;
-          silenceMs = 0;
           lastPartialAt = Date.now();
           emitter.emit('speech-start');
         }
-        silenceMs = 0;
-        // capture.js already hands us a fresh Float32Array -- keep the reference.
-        chunks.push(samples);
-        bufferedMs += durMs;
 
         const now = Date.now();
         if (now - lastPartialAt >= PARTIAL_EVERY_MS) {
@@ -535,7 +541,6 @@ function createSTTEngine(modelPath = MODEL_PATH) {
         chunks.push(samples);
         bufferedMs += durMs;
         silenceMs += durMs;
-        // Keep refreshing partials during short pauses mid-sentence.
         const now = Date.now();
         if (now - lastPartialAt >= PARTIAL_EVERY_MS && silenceMs < SILENCE_FINAL_MS) {
           requestPartial();
@@ -544,6 +549,12 @@ function createSTTEngine(modelPath = MODEL_PATH) {
           requestFinal();
           return;
         }
+      } else {
+        // Quiet before speech-start — discard noise prebuffer.
+        chunks.length = 0;
+        bufferedMs = 0;
+        loudMs = 0;
+        silenceMs = 0;
       }
 
       if (speaking && bufferedMs >= MAX_UTTERANCE_MS) {
