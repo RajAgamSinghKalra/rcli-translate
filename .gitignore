@@ -3,6 +3,7 @@ models/*/
 bin/
 transcripts/*.log
 sessions/
+logs/
 *.tar.bz2
 *.bin
 run.bat

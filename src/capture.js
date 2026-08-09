@@ -14,7 +14,19 @@ const BYTES_PER_SAMPLE = 4; // float32
 function filterCaptureStderr(text) {
   return text
     .split(/\r?\n/)
-    .filter((line) => line && !/data discontinuity in recording/i.test(line))
+    .filter((line) => {
+      if (!line) return false;
+      if (/data discontinuity in recording/i.test(line)) return false;
+      // Mic silence is noisy and unrelated to meeting loopback translate.
+      if (/WARNING: microphone is returning silence/i.test(line)) return false;
+      if (/Check hardware mute/i.test(line)) return false;
+      if (/List devices:/i.test(line) && /capture_audio/i.test(line)) return false;
+      if (/Razer Kraken mute/i.test(line)) return false;
+      if (/Razer Synapse/i.test(line)) return false;
+      if (/Windows Settings/i.test(line)) return false;
+      if (/mic-level rms=/i.test(line)) return false;
+      return true;
+    })
     .join('\n');
 }
 

@@ -27,11 +27,12 @@ const INITIAL_PROMPT =
   );
 
 // Live partial cadence — snappy defaults (override with RCLI_XL8_PARTIAL_MS etc).
-const PARTIAL_EVERY_MS = Number(env('PARTIAL_MS', '900')) || 900;
-const MIN_PARTIAL_AUDIO_MS = Number(env('MIN_PARTIAL_MS', '450')) || 450;
-const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '650')) || 650;
+const PARTIAL_EVERY_MS = Number(env('PARTIAL_MS', '800')) || 800;
+const MIN_PARTIAL_AUDIO_MS = Number(env('MIN_PARTIAL_MS', '400')) || 400;
+const SILENCE_FINAL_MS = Number(env('VAD_SILENCE_MS', '550')) || 550;
 const MAX_UTTERANCE_MS = Number(env('VAD_MAX_MS', '25000')) || 25000;
-const ENERGY_GATE = Number(env('VAD_THRESHOLD', String(ENERGY_THRESHOLD))) || ENERGY_THRESHOLD;
+// Slightly more sensitive so quiet Meet loopback still trips speech detection.
+const ENERGY_GATE = Number(env('VAD_THRESHOLD', '0.005')) || 0.005;
 
 const MODEL_URL =
   'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin';
@@ -408,10 +409,12 @@ function createSTTEngine(modelPath = MODEL_PATH) {
           if (streamClosed || engineClosed) return;
           lastPartialText = '';
           const t = (result && result.text) || '';
+          const lang = (result && result.lang) || 'und';
+          // Always emit final (even empty) so the app can log misses.
           if (t) {
             committedPrompt = `${committedPrompt} ${t}`.trim().slice(-500);
-            emitter.emit('final', { text: t, lang: (result && result.lang) || 'und' });
           }
+          emitter.emit('final', { text: t, lang, msAudio: Math.round((samples.length / SAMPLE_RATE) * 1000) });
         })
         .catch((err) => {
           if (!streamClosed && !engineClosed) emitter.emit('error', err);
@@ -429,7 +432,7 @@ function createSTTEngine(modelPath = MODEL_PATH) {
           speaking = true;
           silenceMs = 0;
           lastPartialAt = Date.now();
-          emitter.emit('partial', '…');
+          emitter.emit('speech-start');
         }
         silenceMs = 0;
         // capture.js already hands us a fresh Float32Array -- keep the reference.

@@ -213,16 +213,22 @@ def _transcribe(lib, ctx, samples, n_samples, lang_bytes, prompt_bytes, mode, n_
     params.print_timestamps = False
     lang_str = (lang_bytes or b"en").decode("utf-8", errors="replace").strip().lower() or "en"
     auto = lang_str in ("auto", "detect", "")
-    params.language = b"auto" if auto else lang_str.encode("utf-8")
-    params.detect_language = auto
-    params.initial_prompt = prompt_bytes
-    params.carry_initial_prompt = True
+    # NULL language + detect_language is the reliable auto path on whisper.cpp.
+    # Passing the literal "auto" string can yield empty transcripts on some builds.
+    if auto:
+        params.language = None
+        params.detect_language = True
+    else:
+        params.language = lang_str.encode("utf-8")
+        params.detect_language = False
+    params.initial_prompt = prompt_bytes if prompt_bytes else None
+    params.carry_initial_prompt = bool(prompt_bytes)
     params.temperature = 0.0
     params.temperature_inc = 0.0  # don't climb -- better for accented speech
     params.suppress_blank = True
     params.suppress_nst = True
-    # Slightly stricter on partials (less hallucinated filler mid-stream).
-    params.no_speech_thold = 0.7 if mode == 0 else 0.55
+    # Partials were too strict and often returned empty → UI stuck on "…".
+    params.no_speech_thold = 0.6 if mode == 0 else 0.5
     if mode == 1:
         params.beam_search.beam_size = 5
         params.beam_search.patience = 1.0

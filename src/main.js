@@ -40,6 +40,7 @@ const {
   CONTEXT_TOKEN_BUDGET,
 } = require('./llm');
 const { translateUtterance } = require('./translate');
+const { createLogger } = require('./log');
 const {
   banner,
   formatPartialLine,
@@ -257,6 +258,7 @@ function normalizeFinalPayload(payload) {
 }
 
 async function main() {
+  const log = createLogger();
   let opts;
   try {
     opts = parseArgs(process.argv.slice(2));
@@ -267,6 +269,15 @@ async function main() {
     }
     throw err;
   }
+  log.info('argv', process.argv.slice(2));
+  log.info('opts', {
+    to: opts.to,
+    other: opts.other,
+    speakers: opts.speakersDevice,
+    loopback: opts.loopbackDevice,
+    muteOriginal: opts.muteOriginal,
+    tts: opts.tts,
+  });
   if (opts.help) {
     console.log(USAGE);
     return;
@@ -316,6 +327,8 @@ async function main() {
     await stt.ready();
   }
   console.log(`[rcli-translate] STT ready (engine: ${STT_ENGINE}).`);
+
+  console.log(`[rcli-translate] debug log: ${log.latestPath}`);
 
   const tts = opts.tts ? createTTS({ device: opts.speakersDevice }) : null;
   console.log(
@@ -418,10 +431,13 @@ async function main() {
       sttStreams.meeting.reset();
     }
     recording = true;
+    log.attachSession(sessionDir);
+    log.info('live translate ON', { reason, appName, to: opts.to, sessionDir });
     status.set('listen', `→ ${opts.to}`);
     notify(
       `live translate ON (${reason}; window: "${appName}"; → ${opts.to}). Session: ${sessionDir}`
     );
+    notify(`debug log: ${log.sessionPath || log.latestPath}`);
   }
 
   async function handleCommand(cmd) {
@@ -657,6 +673,13 @@ async function main() {
 
   function enqueueMeetingTranslate({ text, lang, startedAt }) {
     const t0 = Date.now();
+    log.event('asr.final', { text, lang, startedAt });
+    // Show what we heard immediately (before LLM), so silence isn't "nothing works".
+    printLine(
+      paint(c.dim, '◇ heard ') +
+        paint(c.cyan, `[${opts.sourceLabels.meeting}/${lang || '?'}] `) +
+        text
+    );
     status.set('translate', lang && lang !== 'und' ? `${lang} → ${opts.to}` : `→ ${opts.to}`);
     translateQueue.push(async () => {
       ensureSessionState();
@@ -667,14 +690,32 @@ async function main() {
             .map((s) => s.line)
             .join('\n')
         : '';
-      const result = await translateUtterance(engine.llm, {
-        text,
-        to: opts.to,
-        srcLangHint: lang,
-        recentContext,
-        disableThinking: engine.disableThinking,
+      log.event('translate.start', { text, lang, to: opts.to });
+      let result;
+      try {
+        result = await translateUtterance(engine.llm, {
+          text,
+          to: opts.to,
+          srcLangHint: lang,
+          recentContext,
+          disableThinking: engine.disableThinking,
+        });
+      } catch (err) {
+        log.error('translate failed', err.message);
+        notify(`translate failed: ${err.message}`);
+        return;
+      }
+      log.event('translate.done', {
+        ms: Date.now() - t0,
+        fast: !!result.fast,
+        lang: result.lang,
+        translation: result.translation,
+        repaired: result.repaired,
       });
-      if (!result.translation && !result.repaired) return;
+      if (!result.translation && !result.repaired) {
+        log.warn('translate returned empty');
+        return;
+      }
 
       const meta = {
         raw: text,
@@ -695,14 +736,28 @@ async function main() {
       });
       if (answering) deferredLines.push(pretty);
       else printLine(pretty);
-      await speakAnswer(meta.translation);
+      try {
+        await speakAnswer(meta.translation);
+      } catch (err) {
+        log.error('TTS failed', err.message);
+        notify(`TTS failed: ${err.message}`);
+      }
     });
     void pumpTranslateQueue();
   }
 
   function wireStream(sttStream, source) {
     sttStream.on('error', (err) => {
+      log.error(`${source} stt`, err && err.message ? err.message : err);
       notify(`${source} transcription error: ${err && err.message ? err.message : err}`);
+    });
+
+    sttStream.on('speech-start', () => {
+      if (!recording && source === 'meeting') return;
+      log.event('speech.start', { source });
+      if (source === 'meeting' && recording && !answering && !translating) {
+        status.set('listen', 'hearing…');
+      }
     });
 
     sttStream.on('partial', (text, lang) => {
@@ -713,6 +768,7 @@ async function main() {
         utteranceStart[source] = transcript ? transcript.elapsedNow() : Date.now();
       }
       partials[source] = text;
+      log.event('asr.partial', { source, lang, text });
       if (answering || translating) return;
       status.stop();
       readline.clearLine(process.stdout, 0);
@@ -730,16 +786,24 @@ async function main() {
 
     sttStream.on('final', (payload) => {
       const { text, lang } = normalizeFinalPayload(payload);
+      const msAudio = payload && payload.msAudio;
       const startedAt = utteranceStart[source] ?? (transcript ? transcript.elapsedNow() : Date.now());
       utteranceStart[source] = null;
       partials[source] = '';
+      log.event('asr.final.raw', { source, lang, text, msAudio, muted: isAudioMuted(source), recording });
       if (isAudioMuted(source)) return;
       if (!recording && source === 'meeting') return;
-      if (source === 'meeting' && isEchoOfLastSpoken(text)) {
+      if (source === 'meeting' && text && isEchoOfLastSpoken(text)) {
         notify('(ignored meeting echo of my own voice)');
         return;
       }
-      if (!text) return;
+      if (!text) {
+        if (source === 'meeting' && recording) {
+          log.warn('empty ASR final for meeting — no translate');
+          status.set('listen', `→ ${opts.to}`);
+        }
+        return;
+      }
 
       if (source === 'you') {
         const spokenCmd = parseCommand(text, { allowStop: false });
@@ -833,6 +897,8 @@ async function main() {
     status.stop();
     while (deferredLines.length) process.stdout.write(deferredLines.shift() + '\n');
     process.stdout.write('\n' + paint(c.dim, 'rcli-translate · bye') + '\n');
+    log.info('shutting down');
+    log.close();
     for (const source of Object.keys(captures)) captures[source].stop();
     for (const source of Object.keys(sttStreams)) sttStreams[source].close();
     stt.close();
